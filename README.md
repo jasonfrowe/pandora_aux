@@ -89,6 +89,26 @@ Reads a single `InfImg` FITS file, extracts the science data cube, and computes 
 * **`ramp_cube`** *(numpy.ndarray)*: 4D array with shape `(nint, ngroup, x, y)` representing the up-the-ramp readout.
 * **`timestamps`** *(numpy.ndarray)*: 2D array with shape `(nint, ngroup)` containing chronological frame timestamps.
 
+#### Timestamp Calculation Details
+
+The spacecraft clock coarse and fine start times are referenced to the J2000 calendar midnight epoch (`2000-01-01 00:00:00 UTC`).
+
+1. **Calculate the start time ($t_0$)** in seconds since epoch:
+   $$t_0 = \text{CORSTIME} + (\text{FINETIME} \times 10^{-9})$$
+
+2. **Calculate the elapsed time for each frame** at indices $(i, g)$, where $i \in [0, \text{nint}-1]$ is the integration and $g \in [0, \text{ngroup}-1]$ is the group:
+   $$\text{time}_{\text{seconds}}(i, g) = t_0 + (i \times \text{ngroup} + g) \times (\text{FRMTIME} \times 10^{-3})$$
+   *(Note: `FRMTIME` in the header is in milliseconds, which is converted to seconds).*
+
+3. **Convert to target format**:
+   * **Julian Date (`JD`)**:
+     $$\text{JD}(i, g) = 2451544.5 + \frac{\text{time}_{\text{seconds}}(i, g)}{86400.0}$$
+     *(The Julian Date of midnight Jan 1, 2000 is exactly $2451544.5$).*
+   * **Modified Julian Date (`MJD`)**:
+     $$\text{MJD}(i, g) = 51544.0 + \frac{\text{time}_{\text{seconds}}(i, g)}{86400.0}$$
+     *(The Modified Julian Date of midnight Jan 1, 2000 is exactly $51544.0$).*
+
+
 #### Usage Example:
 ```python
 from pandora_tools import get_target_files, read_InfImg
