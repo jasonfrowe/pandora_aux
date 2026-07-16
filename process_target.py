@@ -22,7 +22,10 @@ for idx, filepath in enumerate(files, 1):
     print(f"{idx}: {filepath}")
 
 # %%
-ramp_cube, timestamps, start_timestamps = pandora.read_InfImg(files[0], time_format="MJD", return_start_times=True)
+data = pandora.read_InfImg(files[0], time_format="MJD")
+ramp_cube = data.ramp_cube
+timestamps = data.timestamps
+start_timestamps = data.start_timestamps
 print(f"\nRamp cube shape: {ramp_cube.shape}")
 # %%
 print(timestamps)
@@ -59,20 +62,63 @@ S = np.zeros(ramp_cube_flat.shape[0])  # Observed signal for the pixel
 Q = np.zeros(ramp_cube_flat.shape[0])  # Trapped charge for the pixel
 F = np.zeros(ramp_cube_flat.shape[0])  # True charge rate for the pixel 
 P = np.zeros(ramp_cube_flat.shape[0])  # Rate of persistence released  
-M = np.zeros(ramp_cube_flat.shape[0])  # Model for the pixel
 
-bias = ramp_cube_flat[0, px, py]  # Bias level for the pixel
+bias = intercepts[0, px, py]  # Guess at bias level for the pixel
 Qo = 0.0  # Initial trapped charge for the pixel
 tau = 120.0  # Decay time constant for the pixel
 eps = 0.18  # Efficiency of the pixel
 
-i = 0
-dt = times_sec_flat[1] - times_sec_flat[0]  # Time difference between consecutive groups
-Q[i] = Qo * np.exp(-dt / tau)  # Initial trapped charge for the pixel
-S[i] = (ramp_cube_flat[1, px, py] - ramp_cube_flat[0, px, py]) / dt  # Initial flux for the pixel
-P[i] = Qo * (1 - np.exp(-dt / tau))  # Initial persistence for the pixel
+# Time from reset to Group 0 midpoint (s)
+dt0 = (data.drops1 + (data.reads - 1) / 2.0) * data.frmtime_sec  
 
-M[i] = S[i] + bias
+# 1. Observed signal rate (DN/sec)
+S[0] = (ramp_cube_flat[0, px, py] - bias) / dt0  
+
+# 2. Persistence rate (DN/sec)
+decay = np.exp(-dt0 / tau)
+P[0] = Qo * (1.0 - decay) / dt0  
+
+# 3. True flux rate (DN/sec)
+F[0] = S[0] - P[0]  
+
+# 4. Trapped charge at the end of interval 0 (DN)
+Q[0] = Qo * decay + eps * F[0] * dt0  
+
+N = len(times_sec_flat)
+for i in range(1, N):
+    dt = times_sec_flat[i] - times_sec_flat[i-1]
+    decay = np.exp(-dt / tau)
+
+    if i % data.ngroup == 0:
+        # Start of a new integration: calculate S[i] using the next group (i to i+1)
+        dt_local = times_sec_flat[i+1] - times_sec_flat[i]
+        S[i] = (ramp_cube_flat[i+1, px, py] - ramp_cube_flat[i, px, py]) / dt_local
+    else:
+        # Normal step within the same integration
+        S[i] = (ramp_cube_flat[i, px, py] - ramp_cube_flat[i-1, px, py]) / dt
+
+    P[i] = Q[i-1] * (1.0 - decay) / dt
+    F[i] = S[i] - P[i]
+    Q[i] = Q[i-1] * decay + eps * F[i] * dt
+
+
+
+# # Extract the fitted true flux for this specific pixel
+# F_pixel = F
+
+# for k in range(N):
+#     if k % data.ngroup == 0:
+#         # Start of an integration: anchor the model to the first group readout
+#         M[k] = ramp_cube_flat[k, px, py]
+#     else:
+#         # Within the same integration: accumulate signal
+#         dt = times_sec_flat[k] - times_sec_flat[k-1]
+        
+#         # Modeled signal rate = True Flux + Modeled Persistence rate
+#         S_model = F_pixel + P_cube[k, px, py]
+        
+#         # Integrate (counts at previous step + rate * time)
+#         M[k] = M[k-1] + S_model * dt
 
 plt.plot(times_sec_flat - times_sec_flat[0], M, color="red", label="Pixel model")
 
