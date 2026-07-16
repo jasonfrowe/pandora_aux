@@ -89,16 +89,28 @@ def read_InfImg(filepath, time_format="JD"):
         # Reshape to 4D datacube with dimensions (nint, ngroup, x, y)
         ramp_cube = data_xy.reshape(nint, ngroup, x, y)
         
-        # Calculate time in seconds since 2000-01-01 00:00:00 UTC
-        # CORSTIME: coarse start time in seconds
-        # FINETIME: fine start time in nanoseconds
-        # FRMTIME: frame time in milliseconds
-        t0_sec = prim_hdr.get("CORSTIME", 0.0) + prim_hdr.get("FINETIME", 0.0) * 1e-9
-        frmtime_sec = prim_hdr.get("FRMTIME", 0.0) * 1e-3  # Convert milliseconds to seconds
+        # Get timing parameters from the primary header with fallbacks
+        frmtime = prim_hdr.get("FRMTIME", 231.0)     # ms
+        reads = prim_hdr.get("READS", 4)
+        drops1 = prim_hdr.get("DROPS1", 1)
+        drops2 = prim_hdr.get("DROPS2", 16)
+        resets1 = prim_hdr.get("RESETS1", 50)
+        frmstot = prim_hdr.get("FRMSTOT", nint * 106 + 50)
         
-        # Build 2D seconds-since-epoch array of shape (nint, ngroup)
-        frame_indices = np.arange(nint * ngroup).reshape(nint, ngroup)
-        times_sec = t0_sec + frame_indices * frmtime_sec
+        # Calculate frames per integration (default to 106 if cannot be derived)
+        frames_per_integration = int((frmstot - resets1 + 1) // nint) if nint > 0 else 106
+        
+        # Calculate absolute start time in seconds since J2000 epoch (2000-01-01 00:00:00 UTC)
+        t0_sec = prim_hdr.get("CORSTIME", 0.0) + prim_hdr.get("FINETIME", 0.0) * 1e-9
+        frmtime_sec = frmtime * 1e-3  # Convert ms to seconds
+        
+        # Build 2D seconds-since-epoch array of shape (nint, ngroup) using exact read timing offsets
+        times_sec = np.zeros((nint, ngroup), dtype=np.float64)
+        for i in range(nint):
+            for g in range(ngroup):
+                # Calculate the exact frame index for group g of integration i
+                frame_idx = (resets1 - 1) + i * frames_per_integration + drops1 + (reads - 1) / 2.0 + g * (reads + drops2)
+                times_sec[i, g] = t0_sec + frame_idx * frmtime_sec
         
         # Convert to target format
         fmt = time_format.upper()
