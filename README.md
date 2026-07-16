@@ -93,8 +93,8 @@ Reads a single `InfImg` FITS file, extracts the science data cube, and computes 
 #### Timestamp Calculation Details:
 The spacecraft clock coarse and fine start times are referenced to the J2000 calendar midnight epoch (`2000-01-01 00:00:00 UTC`).
 - **Start time ($t_0$)**: $t_0 = \text{CORSTIME} + (\text{FINETIME} \times 10^{-9})$
-- **Frame index ($\text{idx}(i, g)$)**: $\text{idx}(i, g) = (\text{RESETS1} - 1) + i \times \text{frames\_per\_integration} + \text{drops1} + \frac{\text{reads} - 1}{2} + g \times (\text{reads} + \text{drops2})$
-  *(Where $\text{frames\_per\_integration} = \lfloor (\text{FRMSTOT} - \text{RESETS1} + 1) / \text{nint} \rfloor$)*
+- **Frame index ($\text{idx}(i, g)$)**: $\text{idx}(i, g) = (\text{RESETS1} - 1) + i \times N_{\text{frames}} + \text{drops1} + \frac{\text{reads} - 1}{2} + g \times (\text{reads} + \text{drops2})$
+  *(Where $N_{\text{frames}} = \lfloor (\text{FRMSTOT} - \text{RESETS1} + 1) / \text{nint} \rfloor$ is the number of detector frames per integration cycle)*
 - **Frame time ($t(i, g)$)**: $t(i, g) = t_0 + \text{idx}(i, g) \times (\text{FRMTIME} \times 10^{-3})$
 - **JD**: $2451544.5 + t(i, g)/86400.0$
 - **MJD**: $t(i, g)/86400.0 - 9497.0$ (days relative to Jan 1, 2026).
