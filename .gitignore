@@ -1,0 +1,9 @@
+# Python virtual environment
+.pandora_aux/
+
+# Byte-compiled / cache files
+__pycache__/
+*.py[cod]
+
+# Local database files
+*.db
