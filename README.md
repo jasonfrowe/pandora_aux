@@ -88,9 +88,17 @@ Reads a single `InfImg` FITS file, extracts the science data cube, and computes 
 * **`return_start_times`** *(bool)*: If `True`, also returns the timestamps at the beginning (first read) of each group. Default is `False`.
 
 #### Returns:
-* **`ramp_cube`** *(numpy.ndarray)*: 4D array with shape `(nint, ngroup, x, y)` representing the up-the-ramp readout.
-* **`timestamps`** *(numpy.ndarray)*: 2D array with shape `(nint, ngroup)` containing chronological frame timestamps (at the middle of each group).
-* **`start_timestamps`** *(numpy.ndarray, optional)*: 2D array of timestamps at the start of each group (returned only if `return_start_times=True`).
+* **`data`** ([RampData](file:///home/rowe/python/Pandora_Aux/pandora_tools.py#L54)): An object containing the following attributes:
+  * **`ramp_cube`** *(numpy.ndarray)*: 4D array with shape `(nint, ngroup, x, y)` representing the up-the-ramp readout.
+  * **`timestamps`** *(numpy.ndarray)*: 2D array with shape `(nint, ngroup)` containing chronological frame timestamps (at the middle of each group).
+  * **`start_timestamps`** *(numpy.ndarray)*: 2D array of timestamps at the start of each group.
+  * **`reads`** *(int)*: Number of non-destructive readouts averaged per group.
+  * **`drops1`** *(int)*: Number of initial reset/drop frames.
+  * **`drops2`** *(int)*: Number of intermediate drop frames between groups.
+  * **`resets1`** *(int)*: Number of resets before integration.
+  * **`frmtime`** *(float)*: Detector frame read time in milliseconds.
+  
+  *Note: For backwards compatibility, the returned object supports tuple-like unpacking, behaving like a tuple of length 2 (`ramp_cube, timestamps`) or length 3 (`ramp_cube, timestamps, start_timestamps`) if `return_start_times=True`.*
 
 #### Timestamp Calculation Details:
 

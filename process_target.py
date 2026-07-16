@@ -22,7 +22,7 @@ for idx, filepath in enumerate(files, 1):
     print(f"{idx}: {filepath}")
 
 # %%
-ramp_cube, timestamps = pandora.read_InfImg(files[0], time_format="MJD")
+ramp_cube, timestamps, start_timestamps = pandora.read_InfImg(files[0], time_format="MJD", return_start_times=True)
 print(f"\nRamp cube shape: {ramp_cube.shape}")
 # %%
 print(timestamps)
@@ -67,13 +67,8 @@ tau = 120.0  # Decay time constant for the pixel
 eps = 0.18  # Efficiency of the pixel
 
 i = 0
-S[i] = 0.0  #Observed signal for the pixel
-Q[i] = Qo   #Initial trapped charge for the pixel
-
-
-
-Q[i] = Qo * np.exp(-dt / tau)  # Initial trapped charge for the pixel
 dt = times_sec_flat[1] - times_sec_flat[0]  # Time difference between consecutive groups
+Q[i] = Qo * np.exp(-dt / tau)  # Initial trapped charge for the pixel
 S[i] = (ramp_cube_flat[1, px, py] - ramp_cube_flat[0, px, py]) / dt  # Initial flux for the pixel
 P[i] = Qo * (1 - np.exp(-dt / tau))  # Initial persistence for the pixel
 
@@ -91,8 +86,7 @@ plt.show()
 
 # %%
 F_fit, Q_init_fit = pandora.fit_persistence(ramp_cube, times_sec, epsilon=0.18, tau=120.0)
-# %%
-P_cube, F_cube, Q_cube, S_cube = calculate_persistence(
+P_cube, F_cube, Q_cube, S_cube = pandora.calculate_persistence(
     ramp_cube=ramp_cube,
     timestamps=times_sec,
     epsilon=0.18,

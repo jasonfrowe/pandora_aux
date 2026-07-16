@@ -51,6 +51,45 @@ def get_target_files(target_id, file_type):
     
     return filepaths
 
+class RampData:
+    """
+    A custom structure that holds science ramp data, calculated timestamps, 
+    and detector metadata. Supports tuple-like unpacking and indexing 
+    for backwards compatibility.
+    """
+    def __init__(self, ramp_cube, timestamps, start_timestamps, metadata, return_start_times=False):
+        self.ramp_cube = ramp_cube
+        self.timestamps = timestamps
+        self.start_timestamps = start_timestamps
+        self.metadata = metadata
+        self._return_start_times = return_start_times
+        
+        # Dynamically set metadata keys as attributes
+        for key, val in metadata.items():
+            setattr(self, key, val)
+            
+    def __iter__(self):
+        if self._return_start_times:
+            return iter((self.ramp_cube, self.timestamps, self.start_timestamps))
+        else:
+            return iter((self.ramp_cube, self.timestamps))
+            
+    def __getitem__(self, index):
+        if self._return_start_times:
+            return (self.ramp_cube, self.timestamps, self.start_timestamps)[index]
+        else:
+            return (self.ramp_cube, self.timestamps)[index]
+            
+    def __len__(self):
+        return 3 if self._return_start_times else 2
+        
+    def __repr__(self):
+        return (
+            f"RampData(ramp_cube.shape={self.ramp_cube.shape}, "
+            f"reads={self.reads}, drops1={self.drops1}, drops2={self.drops2}, "
+            f"frmtime={self.frmtime})"
+        )
+
 def read_InfImg(filepath, time_format="JD", return_start_times=False):
     """
     Reads a single InfImg FITS file and extracts the science data cube and timestamps.
@@ -66,10 +105,10 @@ def read_InfImg(filepath, time_format="JD", return_start_times=False):
                                  (first read) of each group. Default is False.
       
     Returns:
-      tuple: (ramp_cube, timestamps) or (ramp_cube, timestamps, start_timestamps)
-        - ramp_cube (numpy.ndarray): 4D array with shape (nint, ngroup, x, y)
-        - timestamps (numpy.ndarray): 2D array with shape (nint, ngroup) containing timestamps at the middle of each group.
-        - start_timestamps (numpy.ndarray, optional): 2D array of timestamps at the start of each group.
+      RampData: An object holding ramp_cube, timestamps, start_timestamps, and detector metadata.
+                Can be unpacked like a tuple:
+                - (ramp_cube, timestamps) if return_start_times is False
+                - (ramp_cube, timestamps, start_timestamps) if return_start_times is True
     """
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"FITS file not found at: {filepath}")
@@ -138,10 +177,23 @@ def read_InfImg(filepath, time_format="JD", return_start_times=False):
         else:
             raise ValueError(f"Unsupported time_format: '{time_format}'. Choose from 'JD', 'MJD', or 'seconds'.")
         
-    if return_start_times:
-        return ramp_cube, timestamps, start_timestamps
-    else:
-        return ramp_cube, timestamps
+    metadata = {
+        "reads": reads,
+        "drops1": drops1,
+        "drops2": drops2,
+        "resets1": resets1,
+        "frmtime": frmtime,
+        "frmstot": frmstot,
+        "t0_sec": t0_sec,
+        "frmtime_sec": frmtime_sec,
+        "frames_per_integration": frames_per_integration,
+        "nint": nint,
+        "ngroup": ngroup,
+        "x": x,
+        "y": y
+    }
+    
+    return RampData(ramp_cube, timestamps, start_timestamps, metadata, return_start_times)
 
 def plot_ramp_cube(ramp_cube, integration_index=0, group_index=None, iraf_contrast=0.25, cmap="viridis", output_path=None):
     """
