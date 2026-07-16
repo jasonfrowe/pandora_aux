@@ -6,6 +6,8 @@ from astropy.io import fits
 from astropy.time import Time
 from astropy.visualization import ZScaleInterval
 from numba import njit, prange
+from scipy.optimize import minimize
+from concurrent.futures import ThreadPoolExecutor
 
 def get_target_files(target_id, file_type):
     """
@@ -490,6 +492,278 @@ def fit_persistence(ramp_cube, timestamps, epsilon=0.18, tau=120.0):
     
     return F_fit, Q_init_fit
 
+def _fit_pixel_eps_tau(times_flat, S_pixel, dt, eps_init, tau_init):
+    """
+    Helper function to fit eps and tau for a single pixel.
+    Uses profile likelihood (Variable Projection) to analytically solve for 
+    F and Q_init for each evaluation of eps and tau.
+    """
+    N = len(times_flat)
+    
+    def loss_func(params):
+        eps, tau = params
+        if eps < 0.0 or eps > 1.0 or tau <= 0.5:
+            return 1e20
+            
+        d = np.exp(-dt / tau)
+        h = (1.0 - d) / dt
+        
+        M00 = M01 = M11 = V0 = V1 = 0.0
+        a_prev = 1.0
+        b_prev = 0.0
+        
+        for k in range(N):
+            dk = d[k]
+            hk = h[k]
+            A_k = a_prev * hk
+            B_k = 1.0 + b_prev * hk
+            
+            a_curr = a_prev * dk
+            b_curr = b_prev * dk + eps * dt[k]
+            
+            Sk = S_pixel[k]
+            M00 += A_k * A_k
+            M01 += A_k * B_k
+            M11 += B_k * B_k
+            V0 += A_k * Sk
+            V1 += B_k * Sk
+            
+            a_prev = a_curr
+            b_prev = b_curr
+            
+        det = M00 * M11 - M01 * M01
+        if det < 1e-12:
+            return 1e20
+            
+        Q_val = max(0.0, (M11 * V0 - M01 * V1) / det)
+        F_val = max(0.0, (M00 * V1 - M01 * V0) / det)
+        
+        res = 0.0
+        a_prev = 1.0
+        b_prev = 0.0
+        for k in range(N):
+            dk = d[k]
+            hk = h[k]
+            A_k = a_prev * hk
+            B_k = 1.0 + b_prev * hk
+            
+            S_model_k = A_k * Q_val + B_k * F_val
+            res += (S_pixel[k] - S_model_k)**2
+            
+            a_prev = a_prev * dk
+            b_prev = b_prev * dk + eps * dt[k]
+            
+        return res
+
+    res = minimize(
+        loss_func,
+        x0=np.array([eps_init, tau_init]),
+        method="L-BFGS-B",
+        bounds=[(0.0, 1.0), (1.0, 1000.0)]
+    )
+    
+    eps_fit, tau_fit = res.x
+    
+    # Calculate final F and Q_init for the optimal eps and tau
+    d = np.exp(-dt / tau_fit)
+    h = (1.0 - d) / dt
+    M00 = M01 = M11 = V0 = V1 = 0.0
+    a_prev = 1.0
+    b_prev = 0.0
+    for k in range(N):
+        dk = d[k]
+        hk = h[k]
+        A_k = a_prev * hk
+        B_k = 1.0 + b_prev * hk
+        a_curr = a_prev * dk
+        b_curr = b_prev * dk + eps_fit * dt[k]
+        
+        M00 += A_k * A_k
+        M01 += A_k * B_k
+        M11 += B_k * B_k
+        V0 += A_k * S_pixel[k]
+        V1 += B_k * S_pixel[k]
+        
+        a_prev = a_curr
+        b_prev = b_curr
+        
+    det = M00 * M11 - M01 * M01
+    Q_fit = max(0.0, (M11 * V0 - M01 * V1) / det) if det > 1e-12 else 0.0
+    F_fit = max(0.0, (M00 * V1 - M01 * V0) / det) if det > 1e-12 else 0.0
+    
+    return eps_fit, tau_fit, F_fit, Q_fit
+
+def fit_persistence_model(ramp_cube, timestamps, mode="global", eps_init=0.18, tau_init=120.0, mask=None):
+    """
+    Fits the trapped-charge persistence model to estimate eps and tau either
+    globally (shared detector values) or locally (pixel maps), along with true flux (F)
+    and initial trapped charge (Q_init).
+    
+    Parameters:
+      ramp_cube (numpy.ndarray): 4D array of shape (nint, ngroup, x, y).
+      timestamps (numpy.ndarray): 2D array of shape (nint, ngroup) containing UTC timestamps in seconds.
+      mode (str): Fitting mode. Options: 'global' (returns scalar eps, tau) 
+                                       or 'local' (returns 2D eps, tau maps).
+                  Default: 'global'.
+      eps_init (float): Initial guess for trapping efficiency (default: 0.18).
+      tau_init (float): Initial guess for decay timescale in seconds (default: 120.0).
+      mask (numpy.ndarray): Optional 2D boolean mask of shape (x, y). If provided, 
+                            local optimization is only performed where mask is True.
+                            Other pixels default to (eps_init, tau_init, linear fits).
+                            
+    Returns:
+      tuple: (eps_fit, tau_fit, F_fit, Q_init_fit)
+        - eps_fit (float or 2D numpy.ndarray): Trapping efficiency.
+        - tau_fit (float or 2D numpy.ndarray): Decay constant in seconds.
+        - F_fit (2D numpy.ndarray): Fitted true flux map (DN/s).
+        - Q_init_fit (2D numpy.ndarray): Fitted initial trapped charge map (DN).
+    """
+    nint, ngroup, nx, ny = ramp_cube.shape
+    N = nint * ngroup
+    
+    # Flatten timestamps and calculate dt
+    times_flat = np.asarray(timestamps, dtype=np.float64).flatten()
+    dt = np.zeros(N, dtype=np.float64)
+    dt[0] = times_flat[1] - times_flat[0]
+    dt[1:] = np.diff(times_flat)
+    
+    # Compute observed rates S_cube
+    S_cube = np.zeros((N, nx, ny), dtype=np.float64)
+    for i in range(nint):
+        k0 = i * ngroup
+        C0 = ramp_cube[i, 0].astype(np.float64)
+        C1 = ramp_cube[i, 1].astype(np.float64)
+        dt1 = times_flat[k0 + 1] - times_flat[k0]
+        S_cube[k0] = (C1 - C0) / dt1
+        
+        for g in range(1, ngroup):
+            k = k0 + g
+            C_curr = ramp_cube[i, g].astype(np.float64)
+            C_prev = ramp_cube[i, g-1].astype(np.float64)
+            dt_curr = times_flat[k] - times_flat[k-1]
+            S_cube[k] = (C_curr - C_prev) / dt_curr
+            
+    if mode.lower() == "global":
+        print("Fitting global eps and tau across all pixels...")
+        
+        # Optimize global eps and tau using the sum of chi-squared across all pixels
+        def global_loss(params):
+            eps, tau = params
+            if eps < 0.0 or eps > 1.0 or tau <= 0.5:
+                return 1e30
+                
+            d = np.exp(-dt / tau)
+            h = (1.0 - d) / dt
+            
+            A = np.zeros(N)
+            B = np.zeros(N)
+            a_prev = 1.0
+            b_prev = 0.0
+            
+            for k in range(N):
+                A[k] = a_prev * h[k]
+                B[k] = 1.0 + b_prev * h[k]
+                a_prev = a_prev * d[k]
+                b_prev = b_prev * d[k] + eps * dt[k]
+                
+            M00 = np.sum(A * A)
+            M01 = np.sum(A * B)
+            M11 = np.sum(B * B)
+            det = M00 * M11 - M01 * M01
+            if det < 1e-12:
+                return 1e30
+                
+            V0 = np.sum(A[:, np.newaxis, np.newaxis] * S_cube, axis=0)
+            V1 = np.sum(B[:, np.newaxis, np.newaxis] * S_cube, axis=0)
+            
+            Q_fit = np.clip((M11 * V0 - M01 * V1) / det, 0.0, None)
+            F_fit = np.clip((M00 * V1 - M01 * V0) / det, 0.0, None)
+            
+            S_model = A[:, np.newaxis, np.newaxis] * Q_fit + B[:, np.newaxis, np.newaxis] * F_fit
+            return np.sum((S_cube - S_model)**2)
+
+        res = minimize(
+            global_loss,
+            x0=np.array([eps_init, tau_init]),
+            method="L-BFGS-B",
+            bounds=[(0.0, 1.0), (1.0, 1000.0)]
+        )
+        eps_fit, tau_fit = res.x
+        
+        # Calculate final linear coefficients for optimal global params
+        d = np.exp(-dt / tau_fit)
+        h = (1.0 - d) / dt
+        A = np.zeros(N)
+        B = np.zeros(N)
+        a_prev = 1.0
+        b_prev = 0.0
+        for k in range(N):
+            A[k] = a_prev * h[k]
+            B[k] = 1.0 + b_prev * h[k]
+            a_prev = a_prev * d[k]
+            b_prev = b_prev * d[k] + eps_fit * dt[k]
+            
+        M00 = np.sum(A * A)
+        M01 = np.sum(A * B)
+        M11 = np.sum(B * B)
+        det = M00 * M11 - M01 * M01
+        
+        V0 = np.sum(A[:, np.newaxis, np.newaxis] * S_cube, axis=0)
+        V1 = np.sum(B[:, np.newaxis, np.newaxis] * S_cube, axis=0)
+        
+        Q_init_fit = np.clip((M11 * V0 - M01 * V1) / det, 0.0, None)
+        F_fit = np.clip((M00 * V1 - M01 * V0) / det, 0.0, None)
+        
+        return eps_fit, tau_fit, F_fit, Q_init_fit
+        
+    elif mode.lower() == "local":
+        eps_map = np.full((nx, ny), float(eps_init), dtype=np.float64)
+        tau_map = np.full((nx, ny), float(tau_init), dtype=np.float64)
+        F_map = np.zeros((nx, ny), dtype=np.float64)
+        Q_map = np.zeros((nx, ny), dtype=np.float64)
+        
+        # Determine which pixels to fit using mask
+        if mask is None:
+            mask = np.ones((nx, ny), dtype=bool)
+            
+        pixel_indices = []
+        for x in range(nx):
+            for y in range(ny):
+                if mask[x, y]:
+                    pixel_indices.append((x, y))
+                    
+        print(f"Fitting local eps and tau for {len(pixel_indices)} masked pixels...")
+        
+        def fit_single_pixel(x, y):
+            S_pixel = S_cube[:, x, y]
+            eps_val, tau_val, F_val, Q_val = _fit_pixel_eps_tau(times_flat, S_pixel, dt, eps_init, tau_init)
+            return x, y, eps_val, tau_val, F_val, Q_val
+            
+        import os
+        num_threads = os.cpu_count() or 4
+        
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
+            results = executor.map(lambda p: fit_single_pixel(p[0], p[1]), pixel_indices)
+            
+        for x, y, eps_val, tau_val, F_val, Q_val in results:
+            eps_map[x, y] = eps_val
+            tau_map[x, y] = tau_val
+            F_map[x, y] = F_val
+            Q_map[x, y] = Q_val
+            
+        # For non-masked pixels, solve with initial nominal parameters
+        non_masked_indices = np.where(~mask)
+        if len(non_masked_indices[0]) > 0:
+            print(f"Solving linear fits with nominal parameters for remaining {len(non_masked_indices[0])} pixels...")
+            F_nom, Q_nom = fit_persistence(ramp_cube, timestamps, epsilon=eps_init, tau=tau_init)
+            for x, y in zip(non_masked_indices[0], non_masked_indices[1]):
+                F_map[x, y] = F_nom[x, y]
+                Q_map[x, y] = Q_nom[x, y]
+                
+        return eps_map, tau_map, F_map, Q_map
+    else:
+        raise ValueError("Mode must be either 'global' or 'local'.")
+
 def plot_persistence_model(timestamps, S_cube, F_cube, P_cube, Q_cube, x_pixel, y_pixel, output_path=None):
     """
     Plots the observed signal rate, true flux, persistence current, and trapped charge 
@@ -538,7 +812,7 @@ def plot_persistence_model(timestamps, S_cube, F_cube, P_cube, Q_cube, x_pixel, 
         plt.show()
 
 if __name__ == "__main__":
-    # Demonstration of how to use get_target_files, read_InfImg, plot_ramp_cube, fit_ramp, calculate_persistence, and fit_persistence
+    # Demonstration of how to use get_target_files, read_InfImg, plot_ramp_cube, fit_ramp, calculate_persistence, fit_persistence, and fit_persistence_model
     target = "WASP-18b"
     ftype = "InfImg"
     
@@ -585,33 +859,54 @@ if __name__ == "__main__":
             print(f"   Slope                 : {slopes[mid_int, px, py]:.3f} DN/s")
             print(f"   Intercept (Bias)      : {intercepts[mid_int, px, py]:.3f} DN")
             
-            # Run analytical persistence fitting to get 2D arrays F_fit and Q_init_fit
-            print(f"\n8. Performing analytical linear least squares fit of the persistence model...")
-            # We use epsilon=0.18 and tau=120.0
-            F_fit, Q_init_fit = fit_persistence(ramp_cube, times_sec, epsilon=0.18, tau=120.0)
-            
-            print(f"\n9. Fitted Parameters Properties:")
-            print(f"   Fitted True Flux F_fit shape      : {F_fit.shape}")
-            print(f"   Fitted Initial Charge Q_init shape : {Q_init_fit.shape}")
-            print(f"   F_fit range (DN/s)                 : [{F_fit.min():.3f}, {F_fit.max():.3f}]")
-            print(f"   Q_init_fit range (DN)              : [{Q_init_fit.min():.3f}, {Q_init_fit.max():.3f}]")
+            # Run global parameter fitting (single global eps and tau across the entire detector)
+            print(f"\n8. Performing GLOBAL least squares fit for eps and tau...")
+            eps_glob, tau_glob, F_fit_glob, Q_init_glob = fit_persistence_model(
+                ramp_cube=ramp_cube,
+                timestamps=times_sec,
+                mode="global",
+                eps_init=0.18,
+                tau_init=120.0
+            )
+            print(f"\n9. GLOBAL Fit Results:")
+            print(f"   Fitted Global Epsilon (eps) : {eps_glob:.5f}")
+            print(f"   Fitted Global Tau (seconds) : {tau_glob:.3f} s")
             print(f"   Sample pixel (x={px}, y={py}) fitted:")
-            print(f"     True Incident Flux (F_fit)       : {F_fit[px, py]:.3f} DN/s")
-            print(f"     Initial Trapped Charge (Q_init)  : {Q_init_fit[px, py]:.3f} DN")
+            print(f"     True Incident Flux (F)    : {F_fit_glob[px, py]:.3f} DN/s")
+            print(f"     Initial Trapped Charge (Q): {Q_init_glob[px, py]:.3f} DN")
             
-            # Generate the fitted forward model using our fitted parameters
-            print(f"\n10. Calculating model using fitted parameters...")
+            # Run local parameter fitting on a small mask of size 5x5 around the central pixel (to save time)
+            mask = np.zeros((ramp_cube.shape[2], ramp_cube.shape[3]), dtype=bool)
+            mask[px-2:px+3, py-2:py+3] = True
+            
+            print(f"\n10. Performing LOCAL least squares fit on a 5x5 mask centered at ({px}, {py})...")
+            eps_loc, tau_loc, F_fit_loc, Q_init_loc = fit_persistence_model(
+                ramp_cube=ramp_cube,
+                timestamps=times_sec,
+                mode="local",
+                eps_init=0.18,
+                tau_init=120.0,
+                mask=mask
+            )
+            print(f"\n11. LOCAL Fit Results for pixel (x={px}, y={py}):")
+            print(f"   Fitted Epsilon (eps)        : {eps_loc[px, py]:.5f}")
+            print(f"   Fitted Tau (seconds)        : {tau_loc[px, py]:.3f} s")
+            print(f"   True Incident Flux (F)      : {F_fit_loc[px, py]:.3f} DN/s")
+            print(f"   Initial Trapped Charge (Q)  : {Q_init_loc[px, py]:.3f} DN")
+            
+            # Generate the fitted forward model using our fitted global parameters
+            print(f"\n12. Generating model with global parameters for plotting...")
             P_cube_fit, F_cube_fit, Q_cube_fit, S_cube_fit = calculate_persistence(
                 ramp_cube=ramp_cube,
                 timestamps=times_sec,
-                epsilon=0.18,
-                tau=120.0,
-                Q_init=Q_init_fit
+                epsilon=eps_glob,
+                tau=tau_glob,
+                Q_init=Q_init_glob
             )
             
             # Save the fitted persistence model plot
-            fit_plot_png = "persistence_fit_plot.png"
-            print(f"\n11. Saving fitted persistence model plot to {fit_plot_png}...")
+            fit_plot_png = "persistence_global_fit_plot.png"
+            print(f"\n13. Saving global persistence fit plot to {fit_plot_png}...")
             plot_persistence_model(
                 timestamps=times_sec,
                 S_cube=S_cube_fit,

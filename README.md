@@ -169,7 +169,13 @@ For each step $k$ in the flattened time series of duration $\Delta t_k = t_k - t
 Computes the persistence model variables ($P$, $F$, $Q$, and $S$) for each pixel.
 
 #### `fit_persistence(ramp_cube, timestamps, epsilon=0.18, tau=120.0)`
-Analytically solves for the 2D arrays of true flux $F(x, y)$ and initial trapped charge $Q_{\text{init}}(x, y)$ per pixel.
+Analytically solves for the 2D arrays of true flux $F(x, y)$ and initial trapped charge $Q_{\text{init}}(x, y)$ per pixel (with fixed $\epsilon$ and $\tau$).
+
+#### `fit_persistence_model(ramp_cube, timestamps, mode="global", eps_init=0.18, tau_init=120.0, mask=None)`
+Fits the non-linear persistence parameters ($\epsilon$, $\tau$) along with $F_{\text{true}}(x, y)$ and $Q_{\text{init}}(x, y)$.
+- **`mode="global"`**: Solves for a single detector-wide $(\epsilon, \tau)$ pair.
+- **`mode="local"`**: Solves for a separate $(\epsilon, \tau)$ pair per pixel (returning 2D parameter maps).
+- **`mask`**: Optional boolean array of shape `(x, y)`. If provided, fits only pixels where mask is True (useful to restrict fits to the stellar spectrum area).
 
 #### `plot_persistence_model(timestamps, S_cube, F_cube, P_cube, Q_cube, x_pixel, y_pixel, output_path=None)`
 Plots model variables over time for a specific pixel.
@@ -179,7 +185,7 @@ Plots model variables over time for a specific pixel.
 ### Data Reduction Example (Ramps and Persistence):
 
 ```python
-from pandora_tools import get_target_files, read_InfImg, fit_ramp, fit_persistence, calculate_persistence, plot_persistence_model
+from pandora_tools import get_target_files, read_InfImg, fit_ramp, fit_persistence_model, calculate_persistence, plot_persistence_model
 
 # 1. Load FITS file
 files = get_target_files("WASP-18b", "InfImg")
@@ -189,16 +195,22 @@ ramp_cube, times_sec = read_InfImg(files[0], time_format="seconds")
 times_rel = times_sec - times_sec[:, 0:1]
 slope_cube, intercept_cube = fit_ramp(times_rel, ramp_cube)
 
-# 3. Fit Persistence to solve for 2D True Flux and Initial Trapped Charge
-F_fit, Q_init_fit = fit_persistence(ramp_cube, times_sec, epsilon=0.18, tau=120.0)
+# 3. Fit global persistence parameters (epsilon, tau) and pixel maps (F, Q_init)
+eps_glob, tau_glob, F_fit_glob, Q_init_glob = fit_persistence_model(
+    ramp_cube=ramp_cube,
+    timestamps=times_sec,
+    mode="global",
+    eps_init=0.18,
+    tau_init=120.0
+)
 
-# 4. Generate the full persistence model timeline using the fits
+# 4. Generate the full persistence model timeline using the global fits
 P_cube, F_cube, Q_cube, S_cube = calculate_persistence(
     ramp_cube=ramp_cube,
     timestamps=times_sec,
-    epsilon=0.18,
-    tau=120.0,
-    Q_init=Q_init_fit
+    epsilon=eps_glob,
+    tau=tau_glob,
+    Q_init=Q_init_glob
 )
 
 # 5. Plot the persistence model fit for pixel (40, 125)
@@ -210,6 +222,6 @@ plot_persistence_model(
     Q_cube=Q_cube,
     x_pixel=40,
     y_pixel=125,
-    output_path="persistence_fit_plot.png"
+    output_path="persistence_global_fit_plot.png"
 )
 ```

@@ -49,6 +49,32 @@ plt.xlabel("Time (MJD)")
 plt.ylabel("Counts (DN)")
 plt.show()
 # %%
-P_cube, F_cube, Q_cube, S_cube = pandora.calculate_persistence(ramp_cube, times_sec, epsilon=0.18, tau=120.0)
+# Working on a persistence model for a single pixel (px, py) across all integrations and groups
+times_sec_flat = times_sec.flatten()
+ramp_cube_flat = ramp_cube.reshape(-1, ramp_cube.shape[2], ramp_cube.shape[3])
+
+plt.plot(times_sec_flat - times_sec_flat[0], ramp_cube_flat[:, px, py], marker="o", linestyle="-")
+
+Q_init = ramp_cube_flat[0, px, py]  # Initial charge for the pixel
+F_init = (ramp_cube_flat[1, px, py] - ramp_cube_flat[0, px, py]) / (times_sec_flat[1] - times_sec_flat[0])  # Initial flux for the pixel
+
+plt.xlim(0, times_sec_flat[12] - times_sec_flat[0])
+
+plt.xlabel("Time (s)")
+plt.ylabel("Counts (DN)")
+plt.show()
+
+
+# %%
+F_fit, Q_init_fit = pandora.fit_persistence(ramp_cube, times_sec, epsilon=0.18, tau=120.0)
+# %%
+P_cube, F_cube, Q_cube, S_cube = calculate_persistence(
+    ramp_cube=ramp_cube,
+    timestamps=times_sec,
+    epsilon=0.18,
+    tau=120.0,
+    Q_init=Q_init_fit
+)
+
 pandora.plot_persistence_model(times_sec, S_cube, F_cube, P_cube, Q_cube, px, py)
 # %%
