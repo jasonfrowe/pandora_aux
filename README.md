@@ -1,47 +1,69 @@
-### Database Schema in  pandora_observations.db 
+# Pandora Target Database
 
-  The database contains a  files  table structured as follows:
+This repository contains tools to index, search, and manage a database of targets observed and their corresponding `InfImg` or `VisSci` FITS files from the Pandora instrument directories.
 
-  •  id  (INTEGER PRIMARY KEY)
-  •  filepath  (TEXT UNIQUE): Absolute path to the FITS file.
-  •  filename  (TEXT): Name of the file.
-  •  target_id  (TEXT): Target name (sourced from FITS  TARG_ID  with standard filename fallback).
-  •  file_type  (TEXT):  InfImg  or  VisSci .
-  •  instrument  (TEXT): Instrument name ( NIRDA  or  VISDA ).
-  •  camera_id  (TEXT): Camera name ( H2rgCam  or  PcoCam ).
-  •  exptime  (REAL): Exposure time.
-  •  ra  /  dec  (REAL): Coordinates ( TARG_RA / TARG_DEC ).
-  •  obs_time  (TEXT): UTC date/time of observation parsed from filename.
-  •  month  /  day  (TEXT): Year subfolder components.
-  ──────
-  ### CLI Tool Usage
+## Database Schema (`pandora_observations.db`)
 
-  Always run the script using the virtual environment's Python binary:
-   ./.pandora_aux/bin/python3 pandora_get_targets.py <command> [args] 
+The SQLite database contains a `files` table structured as follows:
 
-  #### 1. Re-index/Update Database
+| Column Name | Data Type | Description |
+| :--- | :--- | :--- |
+| `id` | `INTEGER` | Primary key (auto-incremented). |
+| `filepath` | `TEXT` | Absolute path to the FITS file (unique). |
+| `filename` | `TEXT` | Name of the FITS file. |
+| `target_id` | `TEXT` | Target name (sourced from FITS `TARG_ID` header, with filename fallback). |
+| `file_type` | `TEXT` | Observation image type (`InfImg` or `VisSci`). |
+| `instrument` | `TEXT` | Instrument name (`NIRDA` or `VISDA`). |
+| `camera_id` | `TEXT` | Camera name (`H2rgCam` or `PcoCam`). |
+| `exptime` | `REAL` | Exposure time. |
+| `ra` | `REAL` | Target Right Ascension (`TARG_RA`). |
+| `dec` | `REAL` | Target Declination (`TARG_DEC`). |
+| `obs_time` | `TEXT` | UTC date/time of observation parsed from the filename (`YYYY-MM-DD HH:MM:SS`). |
+| `month` | `TEXT` | Observation month subfolder component (e.g., `04`). |
+| `day` | `TEXT` | Observation day subfolder component (e.g., `30`). |
 
-  If new files are added to the observation directories, you can run the  index  command. It uses a cache set to skip files that are already
-  indexed, making updates run in a fraction of a second.
+---
 
-    ./.pandora_aux/bin/python3 pandora_get_targets.py index
+## CLI Tool Usage
 
-  #### 2. List All Observed Targets and File Counts
+Always execute the script using the virtual environment's Python binary:
 
-  Shows a formatted table of all targets, counting their  InfImg  and  VisSci  files.
+```bash
+./.pandora_aux/bin/python3 pandora_get_targets.py <command> [args]
+```
 
-    ./.pandora_aux/bin/python3 pandora_get_targets.py targets
+### 1. Re-index / Update Database
 
-  Tip: You can search/filter for targets containing a specific substring, e.g., to find all WASP planets:
+If new files are added to the observation directories, run the `index` command. It uses a cache to skip already indexed files, allowing updates to run in a fraction of a second.
 
-    ./.pandora_aux/bin/python3 pandora_get_targets.py targets --search WASP
+```bash
+./.pandora_aux/bin/python3 pandora_get_targets.py index
+```
 
-  #### 3. View/Export Files for a Specific Target
+### 2. List All Observed Targets and File Counts
 
-  To view details and paths of all FITS files matching a target (e.g.  WASP-18b ):
+List all unique targets indexed in the database along with the count of `InfImg` and `VisSci` files for each:
 
-    ./.pandora_aux/bin/python3 pandora_get_targets.py files --target WASP-18b
+```bash
+./.pandora_aux/bin/python3 pandora_get_targets.py targets
+```
 
-  To filter by file type ( InfImg  or  VisSci ) and save the absolute file paths to a text file (useful for automated processing pipelines):
+You can search/filter targets containing a specific substring (e.g., to find all `WASP` planets):
 
-    ./.pandora_aux/bin/python3 pandora_get_targets.py files --target WASP-18b --type InfImg --output wasp18b_inf_files.txt
+```bash
+./.pandora_aux/bin/python3 pandora_get_targets.py targets --search WASP
+```
+
+### 3. View / Export Files for a Specific Target
+
+To display details and paths of all FITS files matching a target (e.g., `WASP-18b`):
+
+```bash
+./.pandora_aux/bin/python3 pandora_get_targets.py files --target WASP-18b
+```
+
+To filter by file type (`InfImg` or `VisSci`) and save the absolute file paths to a text file (useful for setting up automated processing pipelines for a specific target):
+
+```bash
+./.pandora_aux/bin/python3 pandora_get_targets.py files --target WASP-18b --type InfImg --output wasp18b_inf_files.txt
+```
