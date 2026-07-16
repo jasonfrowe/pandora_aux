@@ -67,3 +67,38 @@ To filter by file type (`InfImg` or `VisSci`) and save the absolute file paths t
 ```bash
 ./.pandora_aux/bin/python3 pandora_get_targets.py files --target WASP-18b --type InfImg --output wasp18b_inf_files.txt
 ```
+
+---
+
+## Data Loading Tools (`pandora_tools.py`)
+
+A set of helper functions is provided in pandora_tools.py to programmatically retrieve and load Pandora observation data.
+
+### `read_InfImg(filepath, time_format="JD")`
+
+Reads a single `InfImg` FITS file, extracts the science data cube, and computes chronological frame timestamps.
+
+#### Parameters:
+* **`filepath`** *(str)*: Path to the `InfImg` FITS file.
+* **`time_format`** *(str)*: Format of the returned timestamps. 
+  * `"JD"` (default): Julian Date.
+  * `"MJD"`: Modified Julian Date.
+  * `"seconds"`: Seconds since midnight J2000 calendar epoch (`2000-01-01T00:00:00Z`).
+
+#### Returns:
+* **`ramp_cube`** *(numpy.ndarray)*: 4D array with shape `(nint, ngroup, x, y)` representing the up-the-ramp readout.
+* **`timestamps`** *(numpy.ndarray)*: 2D array with shape `(nint, ngroup)` containing chronological frame timestamps.
+
+#### Usage Example:
+```python
+from pandora_tools import get_target_files, read_InfImg
+
+# 1. Retrieve InfImg file paths for a target
+files = get_target_files("WASP-18b", "InfImg")
+
+# 2. Load the datacube and timestamps in MJD format
+ramp_cube, mjd_times = read_InfImg(files[0], time_format="MJD")
+
+print("Ramp Cube Shape (nint, ngroup, x, y) :", ramp_cube.shape)
+print("Timestamps Shape (nint, ngroup)      :", mjd_times.shape)
+```
