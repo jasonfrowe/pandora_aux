@@ -103,10 +103,10 @@ The spacecraft clock coarse and fine start times are referenced to the J2000 cal
 3. **Convert to target format**:
    * **Julian Date (`JD`)**:
      $$\text{JD}(i, g) = 2451544.5 + \frac{\text{time}_{\text{seconds}}(i, g)}{86400.0}$$
-     *(The Julian Date of midnight Jan 1, 2000 is exactly $2451544.5$).*
+     *(The Julian Date of midnight Jan 1, 2000 is  $2451544.5$).*
    * **Modified Julian Date (`MJD`)**:
      $$\text{MJD}(i, g) = 51544.0 + \frac{\text{time}_{\text{seconds}}(i, g)}{86400.0}$$
-     *(The Modified Julian Date of midnight Jan 1, 2000 is exactly $51544.0$).*
+     *(The Modified Julian Date of midnight Jan 1, 2000 is  $51544.0$).*
 
 
 #### Usage Example:
