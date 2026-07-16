@@ -75,7 +75,7 @@ print(f"Found {len(files)} files.")
 
 Helper functions are provided to load FITS files into multidimensional arrays and visualize them.
 
-### `read_InfImg(filepath, time_format="JD")`
+### `read_InfImg(filepath, time_format="JD", return_start_times=False)`
 
 Reads a single `InfImg` FITS file, extracts the science data cube, and computes chronological frame timestamps.
 
@@ -85,10 +85,12 @@ Reads a single `InfImg` FITS file, extracts the science data cube, and computes 
   * `"JD"` (default): Julian Date.
   * `"MJD"`: Modified Julian Date relative to Jan 1, 2026 (`2026-01-01T00:00:00Z`).
   * `"seconds"`: Seconds since midnight J2000 calendar epoch (`2000-01-01T00:00:00Z`).
+* **`return_start_times`** *(bool)*: If `True`, also returns the timestamps at the beginning (first read) of each group. Default is `False`.
 
 #### Returns:
 * **`ramp_cube`** *(numpy.ndarray)*: 4D array with shape `(nint, ngroup, x, y)` representing the up-the-ramp readout.
-* **`timestamps`** *(numpy.ndarray)*: 2D array with shape `(nint, ngroup)` containing chronological frame timestamps.
+* **`timestamps`** *(numpy.ndarray)*: 2D array with shape `(nint, ngroup)` containing chronological frame timestamps (at the middle of each group).
+* **`start_timestamps`** *(numpy.ndarray, optional)*: 2D array of timestamps at the start of each group (returned only if `return_start_times=True`).
 
 #### Timestamp Calculation Details:
 

@@ -55,10 +55,34 @@ ramp_cube_flat = ramp_cube.reshape(-1, ramp_cube.shape[2], ramp_cube.shape[3])
 
 plt.plot(times_sec_flat - times_sec_flat[0], ramp_cube_flat[:, px, py], marker="o", linestyle="-")
 
-Q_init = ramp_cube_flat[0, px, py]  # Initial charge for the pixel
-F_init = (ramp_cube_flat[1, px, py] - ramp_cube_flat[0, px, py]) / (times_sec_flat[1] - times_sec_flat[0])  # Initial flux for the pixel
+S = np.zeros(ramp_cube_flat.shape[0])  # Observed signal for the pixel
+Q = np.zeros(ramp_cube_flat.shape[0])  # Trapped charge for the pixel
+F = np.zeros(ramp_cube_flat.shape[0])  # True charge rate for the pixel 
+P = np.zeros(ramp_cube_flat.shape[0])  # Rate of persistence released  
+M = np.zeros(ramp_cube_flat.shape[0])  # Model for the pixel
+
+bias = ramp_cube_flat[0, px, py]  # Bias level for the pixel
+Qo = 0.0  # Initial trapped charge for the pixel
+tau = 120.0  # Decay time constant for the pixel
+eps = 0.18  # Efficiency of the pixel
+
+i = 0
+S[i] = 0.0  #Observed signal for the pixel
+Q[i] = Qo   #Initial trapped charge for the pixel
+
+
+
+Q[i] = Qo * np.exp(-dt / tau)  # Initial trapped charge for the pixel
+dt = times_sec_flat[1] - times_sec_flat[0]  # Time difference between consecutive groups
+S[i] = (ramp_cube_flat[1, px, py] - ramp_cube_flat[0, px, py]) / dt  # Initial flux for the pixel
+P[i] = Qo * (1 - np.exp(-dt / tau))  # Initial persistence for the pixel
+
+M[i] = S[i] + bias
+
+plt.plot(times_sec_flat - times_sec_flat[0], M, color="red", label="Pixel model")
 
 plt.xlim(0, times_sec_flat[12] - times_sec_flat[0])
+plt.ylim(20000, 27000)
 
 plt.xlabel("Time (s)")
 plt.ylabel("Counts (DN)")

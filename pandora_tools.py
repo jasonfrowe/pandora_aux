@@ -51,7 +51,7 @@ def get_target_files(target_id, file_type):
     
     return filepaths
 
-def read_InfImg(filepath, time_format="JD"):
+def read_InfImg(filepath, time_format="JD", return_start_times=False):
     """
     Reads a single InfImg FITS file and extracts the science data cube and timestamps.
     
@@ -62,11 +62,14 @@ def read_InfImg(filepath, time_format="JD"):
                                   'MJD' (Modified Julian Date relative to Jan 1, 2026),
                                   or 'seconds' (seconds since 2000-01-01 00:00:00 UTC).
                          Default: 'JD'.
+      return_start_times (bool): If True, also returns the timestamps at the beginning 
+                                 (first read) of each group. Default is False.
       
     Returns:
-      tuple: (ramp_cube, timestamps)
+      tuple: (ramp_cube, timestamps) or (ramp_cube, timestamps, start_timestamps)
         - ramp_cube (numpy.ndarray): 4D array with shape (nint, ngroup, x, y)
-        - timestamps (numpy.ndarray): 2D array with shape (nint, ngroup) containing timestamps.
+        - timestamps (numpy.ndarray): 2D array with shape (nint, ngroup) containing timestamps at the middle of each group.
+        - start_timestamps (numpy.ndarray, optional): 2D array of timestamps at the start of each group.
     """
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"FITS file not found at: {filepath}")
@@ -106,30 +109,39 @@ def read_InfImg(filepath, time_format="JD"):
         t0_sec = prim_hdr.get("CORSTIME", 0.0) + prim_hdr.get("FINETIME", 0.0) * 1e-9
         frmtime_sec = frmtime * 1e-3  # Convert ms to seconds
         
-        # Build 2D seconds-since-epoch array of shape (nint, ngroup) using exact read timing offsets
+        # Build 2D seconds-since-epoch arrays using exact timing offsets
         times_sec = np.zeros((nint, ngroup), dtype=np.float64)
+        times_start_sec = np.zeros((nint, ngroup), dtype=np.float64)
         for i in range(nint):
             for g in range(ngroup):
-                # Calculate the exact frame index for group g of integration i
+                # Middle of the group reads
                 frame_idx = (resets1 - 1) + i * frames_per_integration + drops1 + (reads - 1) / 2.0 + g * (reads + drops2)
                 times_sec[i, g] = t0_sec + frame_idx * frmtime_sec
+                
+                # Start of the group reads (first read of the group)
+                frame_start_idx = (resets1 - 1) + i * frames_per_integration + drops1 + g * (reads + drops2)
+                times_start_sec[i, g] = t0_sec + frame_start_idx * frmtime_sec
         
         # Convert to target format
         fmt = time_format.upper()
         if fmt == "JD":
             # JD epoch for 2000-01-01 00:00:00 UTC is 2451544.5
             timestamps = 2451544.5 + times_sec / 86400.0
+            start_timestamps = 2451544.5 + times_start_sec / 86400.0
         elif fmt == "MJD":
             # Return MJD relative to Jan 1, 2026 00:00:00 UTC (MJD offset: 61041.0)
-            # J2000 midnight calendar epoch MJD is 51544.0.
-            # Difference in days: 61041.0 - 51544.0 = 9497.0 days.
             timestamps = (times_sec / 86400.0) - 9497.0
+            start_timestamps = (times_start_sec / 86400.0) - 9497.0
         elif fmt == "SECONDS":
             timestamps = times_sec
+            start_timestamps = times_start_sec
         else:
             raise ValueError(f"Unsupported time_format: '{time_format}'. Choose from 'JD', 'MJD', or 'seconds'.")
         
-    return ramp_cube, timestamps
+    if return_start_times:
+        return ramp_cube, timestamps, start_timestamps
+    else:
+        return ramp_cube, timestamps
 
 def plot_ramp_cube(ramp_cube, integration_index=0, group_index=None, iraf_contrast=0.25, cmap="viridis", output_path=None):
     """
