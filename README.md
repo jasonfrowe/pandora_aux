@@ -227,30 +227,49 @@ Computes the trapped-charge persistence model for each pixel.
 
 ---
 
-## `plot_persistence_model(timestamps, S_cube, F_cube, P_cube, Q_cube, x_pixel, y_pixel, output_path=None)`
+## `fit_persistence(ramp_cube, timestamps, epsilon=0.18, tau=120.0)`
 
-Plots the observed signal rate, true flux, persistence current, and trapped charge over time for a specific pixel.
+Analytically fits the trapped-charge persistence model to each pixel's entire time series to solve for the 2D arrays of true incident flux ($F$) and initial trapped charge ($Q_{\text{init}}$) at $t = 0$.
+
+#### Parameters:
+* **`ramp_cube`** *(numpy.ndarray)*: 4D array of shape `(nint, ngroup, x, y)`.
+* **`timestamps`** *(numpy.ndarray)*: 2D array of shape `(nint, ngroup)` containing absolute or relative timestamps (in seconds).
+* **`epsilon`** *(float or numpy.ndarray)*: Trapping efficiency (default: `0.18`).
+* **`tau`** *(float or numpy.ndarray)*: Trapping decay constant in seconds (default: `120.0`).
+
+#### Returns:
+* **`F_fit`** *(numpy.ndarray)*: 2D array of shape `(x, y)` containing the fitted true flux rate ($\text{DN}/\text{s}$).
+* **`Q_init_fit`** *(numpy.ndarray)*: 2D array of shape `(x, y)` containing the fitted initial trapped charge ($\text{DN}$).
 
 ---
 
 ### Usage Example:
 
 ```python
-from pandora_tools import get_target_files, read_InfImg, calculate_persistence, plot_persistence_model
+from pandora_tools import get_target_files, read_InfImg, fit_persistence, calculate_persistence, plot_persistence_model
 
 # 1. Load data
 files = get_target_files("WASP-18b", "InfImg")
 ramp_cube, times_sec = read_InfImg(files[0], time_format="seconds")
 
-# 2. Compute persistence model
-P_cube, F_cube, Q_cube, S_cube = calculate_persistence(
+# 2. Fit the persistence model to solve for 2D arrays of F and Q_init
+F_fit, Q_init_fit = fit_persistence(
     ramp_cube=ramp_cube,
     timestamps=times_sec,
     epsilon=0.18,
     tau=120.0
 )
 
-# 3. Plot for pixel at center (x=40, y=125) and save to image
+# 3. Calculate the full time-series model using the fitted Q_init
+P_cube, F_cube, Q_cube, S_cube = calculate_persistence(
+    ramp_cube=ramp_cube,
+    timestamps=times_sec,
+    epsilon=0.18,
+    tau=120.0,
+    Q_init=Q_init_fit
+)
+
+# 4. Plot the model fit for pixel at center (x=40, y=125) and save to image
 plot_persistence_model(
     timestamps=times_sec,
     S_cube=S_cube,
@@ -259,6 +278,6 @@ plot_persistence_model(
     Q_cube=Q_cube,
     x_pixel=40,
     y_pixel=125,
-    output_path="persistence_plot.png"
+    output_path="persistence_fit_plot.png"
 )
 ```
