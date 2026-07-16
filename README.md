@@ -91,13 +91,26 @@ Reads a single `InfImg` FITS file, extracts the science data cube, and computes 
 * **`timestamps`** *(numpy.ndarray)*: 2D array with shape `(nint, ngroup)` containing chronological frame timestamps.
 
 #### Timestamp Calculation Details:
+
 The spacecraft clock coarse and fine start times are referenced to the J2000 calendar midnight epoch (`2000-01-01 00:00:00 UTC`).
-- **Start time ($t_0$)**: $t_0 = \text{CORSTIME} + (\text{FINETIME} \times 10^{-9})$
-- **Frame index ($\text{idx}(i, g)$)**: $\text{idx}(i, g) = (\text{RESETS1} - 1) + i \times N_{\text{frames}} + \text{drops1} + \frac{\text{reads} - 1}{2} + g \times (\text{reads} + \text{drops2})$
-  *(Where $N_{\text{frames}} = \lfloor (\text{FRMSTOT} - \text{RESETS1} + 1) / \text{nint} \rfloor$ is the number of detector frames per integration cycle)*
-- **Frame time ($t(i, g)$)**: $t(i, g) = t_0 + \text{idx}(i, g) \times (\text{FRMTIME} \times 10^{-3})$
-- **JD**: $2451544.5 + t(i, g)/86400.0$
-- **MJD**: $t(i, g)/86400.0 - 9497.0$ (days relative to Jan 1, 2026).
+
+```text
+Frame index (idx) for integration i, group g:
+idx(i, g) = (RESETS1 - 1) + i * N_frames + drops1 + (reads - 1)/2 + g * (reads + drops2)
+
+Where:
+N_frames = (FRMSTOT - RESETS1 + 1) // nint (detector frames per integration cycle)
+
+Time in seconds since J2000 (t):
+t(i, g) = t_0 + idx(i, g) * (FRMTIME * 1e-3)
+(where t_0 = CORSTIME + FINETIME * 1e-9)
+
+Julian Date (JD):
+JD = 2451544.5 + t(i, g) / 86400.0
+
+Modified Julian Date relative to Jan 1, 2026 (MJD):
+MJD = t(i, g) / 86400.0 - 9497.0
+```
 
 
 ### `plot_ramp_cube(ramp_cube, integration_index=0, group_index=None, iraf_contrast=0.25, cmap="viridis", output_path=None)`
@@ -147,11 +160,11 @@ Fits an optimal weighted least squares line to each pixel's ramp across groups.
 * **`timestamps`** *(numpy.ndarray)*: 1D array of shape `(ngroup)` or 2D array of shape `(nint, ngroup)`.
 * **`ramp_cube`** *(numpy.ndarray)*: 4D array of shape `(nint, ngroup, x, y)`.
 * **`read_noise`** *(float)*: Detector read noise in electrons (default: `10.0`).
-* **`gain`** *(float)*: Detector gain in $e^-/\text{DN}$ (default: `1.0`).
+* **`gain`** *(float)*: Detector gain in e-/DN (default: `1.0`).
 
 #### Returns:
-* **`slope_cube`** *(numpy.ndarray)*: 3D array of shape `(nint, x, y)` containing calculated slopes ($\text{DN}/\text{s}$).
-* **`intercept_cube`** *(numpy.ndarray)*: 3D array of shape `(nint, x, y)` containing calculated intercepts ($\text{DN}$).
+* **`slope_cube`** *(numpy.ndarray)*: 3D array of shape `(nint, x, y)` containing calculated slopes (DN/s).
+* **`intercept_cube`** *(numpy.ndarray)*: 3D array of shape `(nint, x, y)` containing calculated intercepts (DN).
 
 ---
 
@@ -159,22 +172,31 @@ Fits an optimal weighted least squares line to each pixel's ramp across groups.
 
 Persistence is tracked using a discrete linear trap charge and release model across the continuous frame timeline.
 
-#### Trapped Charge Model Equations
-For each step $k$ in the flattened time series of duration $\Delta t_k = t_k - t_{k-1}$:
-1. **Persistence Current Rate ($P_k$)**: $P_k = \frac{Q_{k-1} (1 - e^{-\Delta t_k / \tau})}{\Delta t_k}$ (DN/s)
-2. **True Flux ($F_k$)**: $F_k = S_k - P_k$ (DN/s)
-3. **Trapped Charge Update ($Q_k$)**: $Q_k = Q_{k-1} e^{-\Delta t_k / \tau} + \epsilon F_k \Delta t_k$ (DN)
+For each step k in the flattened time series of duration dt_k = t_k - t_{k-1}:
+
+1. **Persistence Current Rate (P_k)**: 
+   `P_k = Q_{k-1} * (1 - exp(-dt_k / tau)) / dt_k` (DN/s)
+   *(Rate of trapped charge released back into the pixel well).*
+
+2. **True Flux (F_k)**: 
+   `F_k = S_k - P_k` (DN/s)
+   *(Where S_k is the observed signal rate).*
+
+3. **Trapped Charge Update (Q_k)**: 
+   `Q_k = Q_{k-1} * exp(-dt_k / tau) + eps * F_k * dt_k` (DN)
+   *(The new trapped charge at the end of the step).*
+
 
 #### `calculate_persistence(ramp_cube, timestamps, epsilon=0.18, tau=120.0, Q_init=0.0)`
-Computes the persistence model variables ($P$, $F$, $Q$, and $S$) for each pixel.
+Computes the persistence model variables (P, F, Q, and S) for each pixel.
 
 #### `fit_persistence(ramp_cube, timestamps, epsilon=0.18, tau=120.0)`
-Analytically solves for the 2D arrays of true flux $F(x, y)$ and initial trapped charge $Q_{\text{init}}(x, y)$ per pixel (with fixed $\epsilon$ and $\tau$).
+Analytically solves for the 2D arrays of true flux F(x, y) and initial trapped charge Q_init(x, y) per pixel (with fixed epsilon and tau).
 
 #### `fit_persistence_model(ramp_cube, timestamps, mode="global", eps_init=0.18, tau_init=120.0, mask=None)`
-Fits the non-linear persistence parameters ($\epsilon$, $\tau$) along with $F_{\text{true}}(x, y)$ and $Q_{\text{init}}(x, y)$.
-- **`mode="global"`**: Solves for a single detector-wide $(\epsilon, \tau)$ pair.
-- **`mode="local"`**: Solves for a separate $(\epsilon, \tau)$ pair per pixel (returning 2D parameter maps).
+Fits the non-linear persistence parameters (epsilon, tau) along with F_true(x, y) and Q_init(x, y).
+- **`mode="global"`**: Solves for a single detector-wide (epsilon, tau) pair.
+- **`mode="local"`**: Solves for a separate (epsilon, tau) pair per pixel (returning 2D parameter maps).
 - **`mask`**: Optional boolean array of shape `(x, y)`. If provided, fits only pixels where mask is True (useful to restrict fits to the stellar spectrum area).
 
 #### `plot_persistence_model(timestamps, S_cube, F_cube, P_cube, Q_cube, x_pixel, y_pixel, output_path=None)`
