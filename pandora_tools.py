@@ -53,8 +53,9 @@ def read_InfImg(filepath, time_format="JD"):
     Parameters:
       filepath (str): Path to the InfImg FITS file.
       time_format (str): Format of the returned timestamps.
-                         Options: 'JD' (Julian Date), 'MJD' (Modified Julian Date),
-                         or 'seconds' (seconds since 2000-01-01 00:00:00 UTC).
+                         Options: 'JD' (Julian Date), 
+                                  'MJD' (Modified Julian Date relative to Jan 1, 2026),
+                                  or 'seconds' (seconds since 2000-01-01 00:00:00 UTC).
                          Default: 'JD'.
       
     Returns:
@@ -102,8 +103,10 @@ def read_InfImg(filepath, time_format="JD"):
             # JD epoch for 2000-01-01 00:00:00 UTC is 2451544.5
             timestamps = 2451544.5 + times_sec / 86400.0
         elif fmt == "MJD":
-            # MJD epoch for 2000-01-01 00:00:00 UTC is 51544.0
-            timestamps = 51544.0 + times_sec / 86400.0
+            # Return MJD relative to Jan 1, 2026 00:00:00 UTC (MJD offset: 61041.0)
+            # J2000 midnight calendar epoch MJD is 51544.0.
+            # Difference in days: 61041.0 - 51544.0 = 9497.0 days.
+            timestamps = (times_sec / 86400.0) - 9497.0
         elif fmt == "SECONDS":
             timestamps = times_sec
         else:
@@ -139,11 +142,11 @@ if __name__ == "__main__":
             print(f"\n5. Timestamp Details:")
             print(f"   First Frame:")
             print(f"     JD   : {jd_times[0, 0]:.8f}")
-            print(f"     MJD  : {mjd_times[0, 0]:.8f}")
+            print(f"     MJD  : {mjd_times[0, 0]:.8f} (days since Jan 1, 2026)")
             print(f"     UTC  : {Time(jd_times[0, 0], format='jd').iso}")
             print(f"   Last Frame:")
             print(f"     JD   : {jd_times[-1, -1]:.8f}")
-            print(f"     MJD  : {mjd_times[-1, -1]:.8f}")
+            print(f"     MJD  : {mjd_times[-1, -1]:.8f} (days since Jan 1, 2026)")
             print(f"     UTC  : {Time(jd_times[-1, -1], format='jd').iso}")
         else:
             print("No files found to read.")

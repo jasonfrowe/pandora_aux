@@ -82,7 +82,7 @@ Reads a single `InfImg` FITS file, extracts the science data cube, and computes 
 * **`filepath`** *(str)*: Path to the `InfImg` FITS file.
 * **`time_format`** *(str)*: Format of the returned timestamps. 
   * `"JD"` (default): Julian Date.
-  * `"MJD"`: Modified Julian Date.
+  * `"MJD"`: Modified Julian Date relative to Jan 1, 2026 (`2026-01-01T00:00:00Z`).
   * `"seconds"`: Seconds since midnight J2000 calendar epoch (`2000-01-01T00:00:00Z`).
 
 #### Returns:
@@ -104,9 +104,10 @@ The spacecraft clock coarse and fine start times are referenced to the J2000 cal
    * **Julian Date (`JD`)**:
      $$\text{JD}(i, g) = 2451544.5 + \frac{\text{time}_{\text{seconds}}(i, g)}{86400.0}$$
      *(The Julian Date of midnight Jan 1, 2000 is  $2451544.5$).*
-   * **Modified Julian Date (`MJD`)**:
-     $$\text{MJD}(i, g) = 51544.0 + \frac{\text{time}_{\text{seconds}}(i, g)}{86400.0}$$
-     *(The Modified Julian Date of midnight Jan 1, 2000 is  $51544.0$).*
+   * **Modified Julian Date (`MJD`) relative to Jan 1, 2026**:
+     $$\text{MJD}(i, g) = \frac{\text{time}_{\text{seconds}}(i, g)}{86400.0} - 9497.0$$
+     *(Where $9497.0$ is the number of days between midnight Jan 1, 2000 and midnight Jan 1, 2026).*
+
 
 
 #### Usage Example:
