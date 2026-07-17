@@ -180,37 +180,47 @@ Fits an optimal weighted least squares line to each pixel's ramp across groups.
 
 ### Detector Persistence Modeling
 
-Persistence is tracked using a discrete linear trap charge and release model across the continuous frame timeline.
+Persistence is tracked using a discrete linear trap charge and release model across the continuous frame timeline. Trapping is proportional to the total accumulated signal in the well since the last reset.
 
-For each step k in the flattened time series of duration dt_k = t_k - t_{k-1}:
+For each step $k$ in the flattened time series:
 
-1. **Persistence Current Rate (P_k)**: 
-   `P_k = Q_{k-1} * (1 - exp(-dt_k / tau)) / dt_k` (DN/s)
+1. **Decay and Release Interval ($dt_{\text{decay}}$)**:
+   - For $k = 0$, $dt_{\text{decay}} = dt_0 = (\text{drops1} + \frac{\text{reads}-1}{2}) \times \text{frmtime\_sec}$.
+   - For $k > 0$, $dt_{\text{decay}} = t_k - t_{k-1}$ (which correctly spans resets).
+
+2. **Persistence Current Rate ($P_k$)**: 
+   $P_k = Q_{k-1} \times \frac{1 - e^{-dt_{\text{decay}} / \tau}}{dt_{\text{decay}}}$ (DN/s)
    *(Rate of trapped charge released back into the pixel well).*
 
-2. **True Flux (F_k)**: 
-   `F_k = S_k - P_k` (DN/s)
-   *(Where S_k is the observed signal rate).*
+3. **Trapped Charge Update ($Q_k$)**: 
+   $Q_k = Q_{k-1} \times e^{-dt_{\text{decay}} / \tau} + \epsilon \times F_k \times t_{\text{reset}, k} \times dt_{\text{trap}, k}$ (DN)
+   *(The new trapped charge pool at the end of the step).*
+   - $t_{\text{reset}, k}$ is the integration time elapsed since the last reset of the current integration.
+   - $dt_{\text{trap}, k} = dt_0$ on reset boundaries, and $t_k - t_{k-1}$ otherwise.
 
-3. **Trapped Charge Update (Q_k)**: 
-   `Q_k = Q_{k-1} * exp(-dt_k / tau) + eps * F_k * dt_k` (DN)
-   *(The new trapped charge at the end of the step).*
+4. **Modeled Observed Signal Rate ($S_k$)**:
+   $S_k = F_k + P_k - \epsilon \times F_k \times t_{\text{reset}, k}$ (DN/s)
+   *(Observed signal rate including persistence and trapping loss).*
+
+5. **True Flux ($F_k$)**: 
+   $F_k = \text{star\_rate}$ (DN/s)
+   *(The constant true incident flux rate).*
 
 
-#### `calculate_persistence(ramp_cube, timestamps, epsilon=0.18, tau=120.0, Q_init=0.0)`
-Computes the persistence model variables (P, F, Q, and S) for each pixel.
+#### `calculate_persistence(ramp_cube, timestamps, epsilon=0.18, tau=120.0, Q_init=0.0, F=None)`
+Computes the persistence model variables. Returns a `PersistenceData` structure containing `P_cube`, `F_cube`, `Q_cube`, `S_cube`, `M_cube` (integrated model ramp), and `Mp_cube` (integrated model ramp without persistence).
 
 #### `fit_persistence(ramp_cube, timestamps, epsilon=0.18, tau=120.0)`
-Analytically solves for the 2D arrays of true flux F(x, y) and initial trapped charge Q_init(x, y) per pixel (with fixed epsilon and tau).
+Analytically solves for the 2D arrays of true flux $F(x, y)$ and initial trapped charge $Q_{\text{init}}(x, y)$ per pixel (with fixed epsilon and tau) using the new trapping model.
 
 #### `fit_persistence_model(ramp_cube, timestamps, mode="global", eps_init=0.18, tau_init=120.0, mask=None)`
-Fits the non-linear persistence parameters (epsilon, tau) along with F_true(x, y) and Q_init(x, y).
+Fits the non-linear persistence parameters (epsilon, tau) along with $F_{\text{true}}(x, y)$ and $Q_{\text{init}}(x, y)$.
 - **`mode="global"`**: Solves for a single detector-wide (epsilon, tau) pair.
 - **`mode="local"`**: Solves for a separate (epsilon, tau) pair per pixel (returning 2D parameter maps).
 - **`mask`**: Optional boolean array of shape `(x, y)`. If provided, fits only pixels where mask is True (useful to restrict fits to the stellar spectrum area).
 
-#### `plot_persistence_model(timestamps, S_cube, F_cube, P_cube, Q_cube, x_pixel, y_pixel, output_path=None)`
-Plots model variables over time for a specific pixel.
+#### `plot_persistence_model(timestamps, S_cube, F_cube, P_cube, Q_cube, x_pixel, y_pixel, ramp_cube=None, M_cube=None, Mp_cube=None, output_path=None)`
+Plots model variables over time for a specific pixel. If `ramp_cube` and `M_cube` are provided, displays a 4-panel plot including raw vs modeled integrated ramps.
 
 ---
 

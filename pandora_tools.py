@@ -82,6 +82,32 @@ class RampData:
             f"frmtime={self.frmtime})"
         )
 
+class PersistenceData:
+    """
+    A custom structure that holds modeled persistence results.
+    Supports 4-tuple unpacking for backwards compatibility:
+    P_cube, F_cube, Q_cube, S_cube = data
+    """
+    def __init__(self, P_cube, F_cube, Q_cube, S_cube, M_cube, Mp_cube):
+        self.P_cube = P_cube
+        self.F_cube = F_cube
+        self.Q_cube = Q_cube
+        self.S_cube = S_cube
+        self.M_cube = M_cube
+        self.Mp_cube = Mp_cube
+        
+    def __iter__(self):
+        return iter((self.P_cube, self.F_cube, self.Q_cube, self.S_cube))
+        
+    def __getitem__(self, index):
+        return (self.P_cube, self.F_cube, self.Q_cube, self.S_cube)[index]
+        
+    def __len__(self):
+        return 4
+        
+    def __repr__(self):
+        return f"PersistenceData(P_cube.shape={self.P_cube.shape})"
+
 def read_InfImg(filepath, time_format="JD"):
     """
     Reads a single InfImg FITS file and extracts the science data cube and timestamps.
@@ -326,7 +352,7 @@ def fit_ramp(timestamps, ramp_cube, read_noise=10.0, gain=1.0):
     return _fit_ramp_numba(timestamps, ramp_cube, read_noise, gain)
 
 @njit(parallel=True)
-def _calc_persistence_numba(ramp_cube, times_flat, epsilon, tau, Q_init):
+def _calc_persistence_numba(ramp_cube, times_flat, epsilon, tau, Q_init, F, reads, drops1, drops2, resets1, frmtime_sec):
     nint, ngroup, nx, ny = ramp_cube.shape
     N = nint * ngroup
     
@@ -334,7 +360,9 @@ def _calc_persistence_numba(ramp_cube, times_flat, epsilon, tau, Q_init):
     P_cube = np.zeros((N, nx, ny), dtype=np.float64)
     F_cube = np.zeros((N, nx, ny), dtype=np.float64)
     Q_cube = np.zeros((N, nx, ny), dtype=np.float64)
-    S_cube = np.zeros((N, nx, ny), dtype=np.float64)  # observed signal rate
+    S_cube = np.zeros((N, nx, ny), dtype=np.float64)
+    M_cube = np.zeros((N, nx, ny), dtype=np.float64)
+    Mp_cube = np.zeros((N, nx, ny), dtype=np.float64)
     
     # Time steps
     dt = np.zeros(N, dtype=np.float64)
@@ -342,54 +370,73 @@ def _calc_persistence_numba(ramp_cube, times_flat, epsilon, tau, Q_init):
     for k in range(1, N):
         dt[k] = times_flat[k] - times_flat[k-1]
         
+    dt0_const = (drops1 + (reads - 1) / 2.0) * frmtime_sec
+    
     for x in prange(nx):
         for y in range(ny):
             eps_val = epsilon[x, y]
             tau_val = tau[x, y]
-            
-            # Initial trapped charge
+            star_rate = F[x, y]
             Q_prev = Q_init[x, y]
             
-            # 1. Calculate observed signal rate S for all steps
-            for i in range(nint):
-                k0 = i * ngroup
-                C0 = ramp_cube[i, 0, x, y]
-                C1 = ramp_cube[i, 1, x, y]
-                dt1 = times_flat[k0 + 1] - times_flat[k0]
-                S_cube[k0, x, y] = (C1 - C0) / dt1
-                
-                for g in range(1, ngroup):
-                    k = k0 + g
-                    C_curr = ramp_cube[i, g, x, y]
-                    C_prev = ramp_cube[i, g-1, x, y]
-                    dt_curr = times_flat[k] - times_flat[k-1]
-                    S_cube[k, x, y] = (C_curr - C_prev) / dt_curr
+            time_since_reset = 0.0
+            M_prev = 0.0
+            Mp_prev = 0.0
+            bias_curr = 0.0
             
-            # 2. Run persistence filter across the flattened time series
             for k in range(N):
                 dt_k = dt[k]
-                S_k = S_cube[k, x, y]
                 
-                # Decay factor
-                decay = np.exp(-dt_k / tau_val)
+                # Check for reset boundary
+                if k % ngroup == 0:
+                    time_since_reset = dt0_const
+                    dt_decay = dt0_const
+                    dt_trap = dt0_const
+                else:
+                    time_since_reset += dt_k
+                    dt_decay = dt_k
+                    dt_trap = dt_k
                 
-                # Persistence current rate (DN/s)
-                P_k = Q_prev * (1.0 - decay) / dt_k
+                decay = np.exp(-dt_decay / tau_val)
+                
+                # 1. Release charge from the trap pool
+                released_charge = Q_prev * (1.0 - decay)
+                P_k = released_charge / dt_decay
                 P_cube[k, x, y] = P_k
                 
-                # True flux rate (DN/s)
-                F_k = S_k - P_k
-                F_cube[k, x, y] = F_k
+                # 2. Trap new charge: proportional to true accumulated signal
+                true_accumulated = star_rate * time_since_reset
+                trapped_charge = eps_val * true_accumulated * dt_trap
                 
-                # Update trapped charge
-                Q_k = Q_prev * decay + eps_val * F_k * dt_k
+                # 3. Update the trapped pool
+                Q_k = Q_prev - released_charge + trapped_charge
                 Q_cube[k, x, y] = Q_k
                 
-                Q_prev = Q_k
+                # 4. Calculate observed rate: (True) + (Released) - (Lost to traps)
+                S_k = star_rate + P_k - (trapped_charge / dt_trap)
+                S_cube[k, x, y] = S_k
+                F_cube[k, x, y] = star_rate
                 
-    return P_cube, F_cube, Q_cube, S_cube
+                # 5. Build the ramps
+                if k % ngroup == 0:
+                    # Estimate integration bias based on observed first group counts
+                    bias_curr = ramp_cube[k // ngroup, 0, x, y] - S_k * dt_trap
+                    M_curr = bias_curr + S_k * dt_trap
+                    Mp_curr = bias_curr + star_rate * dt_trap
+                else:
+                    M_curr = M_prev + S_k * dt_trap
+                    Mp_curr = Mp_prev + star_rate * dt_trap
+                
+                M_cube[k, x, y] = M_curr
+                Mp_cube[k, x, y] = Mp_curr
+                
+                Q_prev = Q_k
+                M_prev = M_curr
+                Mp_prev = Mp_curr
+                
+    return P_cube, F_cube, Q_cube, S_cube, M_cube, Mp_cube
 
-def calculate_persistence(ramp_cube, timestamps, epsilon=0.18, tau=120.0, Q_init=0.0):
+def calculate_persistence(ramp_cube, timestamps, epsilon=0.18, tau=120.0, Q_init=0.0, F=None):
     """
     Computes a trapped-charge persistence model for each pixel.
     
@@ -399,13 +446,11 @@ def calculate_persistence(ramp_cube, timestamps, epsilon=0.18, tau=120.0, Q_init
       epsilon (float or numpy.ndarray): Trapping efficiency. Can be a scalar or a 2D array of shape (x, y).
       tau (float or numpy.ndarray): Trapping decay constant in seconds. Can be a scalar or a 2D array of shape (x, y).
       Q_init (float or numpy.ndarray): Initial trapped charge. Can be a scalar or a 2D array of shape (x, y).
+      F (float or numpy.ndarray, optional): True flux rate. If None, it is calculated via fit_persistence.
       
     Returns:
-      tuple: (P_cube, F_cube, Q_cube, S_cube)
-        - P_cube (numpy.ndarray): 3D array of shape (nint * ngroup, x, y) containing persistence rates (DN/s).
-        - F_cube (numpy.ndarray): 3D array of shape (nint * ngroup, x, y) containing true fluxes (DN/s).
-        - Q_cube (numpy.ndarray): 3D array of shape (nint * ngroup, x, y) containing trapped charges (DN).
-        - S_cube (numpy.ndarray): 3D array of shape (nint * ngroup, x, y) containing observed rates (DN/s).
+      PersistenceData: An object holding P_cube, F_cube, Q_cube, S_cube, M_cube, and Mp_cube.
+                       Can be unpacked like a 4-tuple: (P_cube, F_cube, Q_cube, S_cube)
     """
     nint, ngroup, nx, ny = ramp_cube.shape
     
@@ -425,13 +470,34 @@ def calculate_persistence(ramp_cube, timestamps, epsilon=0.18, tau=120.0, Q_init
     else:
         Q_init_arr = np.asarray(Q_init, dtype=np.float64)
         
+    # Get metadata from ramp_cube if available
+    reads = getattr(ramp_cube, "reads", 4)
+    drops1 = getattr(ramp_cube, "drops1", 1)
+    drops2 = getattr(ramp_cube, "drops2", 16)
+    resets1 = getattr(ramp_cube, "resets1", 50)
+    frmtime_sec = getattr(ramp_cube, "frmtime_sec", 0.231)
+    
+    if F is None:
+        F_fit, _ = fit_persistence(ramp_cube, timestamps, epsilon, tau)
+        F_arr = np.asarray(F_fit, dtype=np.float64)
+    else:
+        if isinstance(F, (int, float)):
+            F_arr = np.full((nx, ny), float(F), dtype=np.float64)
+        else:
+            F_arr = np.asarray(F, dtype=np.float64)
+            
     # Flatten timestamps
     times_flat = np.asarray(timestamps, dtype=np.float64).flatten()
     
     # Convert ramp_cube to float64 for fits
     ramp_cube_dbl = np.asarray(ramp_cube, dtype=np.float64)
     
-    return _calc_persistence_numba(ramp_cube_dbl, times_flat, epsilon_arr, tau_arr, Q_init_arr)
+    P_cube, F_cube, Q_cube, S_cube, M_cube, Mp_cube = _calc_persistence_numba(
+        ramp_cube_dbl, times_flat, epsilon_arr, tau_arr, Q_init_arr, F_arr,
+        reads, drops1, drops2, resets1, frmtime_sec
+    )
+    
+    return PersistenceData(P_cube, F_cube, Q_cube, S_cube, M_cube, Mp_cube)
 
 def fit_persistence(ramp_cube, timestamps, epsilon=0.18, tau=120.0):
     """
@@ -464,12 +530,37 @@ def fit_persistence(ramp_cube, timestamps, epsilon=0.18, tau=120.0):
     else:
         tau_arr = np.asarray(tau, dtype=np.float64)
         
+    # Get metadata from ramp_cube if available
+    reads = getattr(ramp_cube, "reads", 4)
+    drops1 = getattr(ramp_cube, "drops1", 1)
+    drops2 = getattr(ramp_cube, "drops2", 16)
+    resets1 = getattr(ramp_cube, "resets1", 50)
+    frmtime_sec = getattr(ramp_cube, "frmtime_sec", 0.231)
+    
     # Flatten timestamps and calculate time steps dt
     times_flat = np.asarray(timestamps, dtype=np.float64).flatten()
     dt = np.zeros(N, dtype=np.float64)
     dt[0] = times_flat[1] - times_flat[0]
     dt[1:] = np.diff(times_flat)
     
+    # Pre-compute timing grids
+    dt_decay = np.zeros(N, dtype=np.float64)
+    dt_trap = np.zeros(N, dtype=np.float64)
+    T = np.zeros(N, dtype=np.float64)
+    
+    dt0_const = (drops1 + (reads - 1) / 2.0) * frmtime_sec
+    
+    dt_decay[0] = dt0_const
+    dt_decay[1:] = dt[1:]
+    
+    for k in range(N):
+        if k % ngroup == 0:
+            dt_trap[k] = dt0_const
+            T[k] = dt0_const
+        else:
+            dt_trap[k] = dt[k]
+            T[k] = T[k-1] + dt[k]
+            
     # Compute observed signal rate S_cube of shape (N, nx, ny)
     S_cube = np.zeros((N, nx, ny), dtype=np.float64)
     for i in range(nint):
@@ -493,25 +584,20 @@ def fit_persistence(ramp_cube, timestamps, epsilon=0.18, tau=120.0):
     V0 = np.zeros((nx, ny), dtype=np.float64)
     V1 = np.zeros((nx, ny), dtype=np.float64)
     
-    # a_k and b_k represent the linear coefficients of Q_k:
-    # Q_k = a_k * Q_init + b_k * F
     a_prev = np.ones((nx, ny), dtype=np.float64)
     b_prev = np.zeros((nx, ny), dtype=np.float64)
     
     # Forward pass to accumulate coefficients
     for k in range(N):
-        dt_k = dt[k]
+        dt_dec_k = dt_decay[k]
+        dt_tr_k = dt_trap[k]
+        T_k = T[k]
         
-        d_k = np.exp(-dt_k / tau_arr)
-        h_k = (1.0 - d_k) / dt_k
+        d_k = np.exp(-dt_dec_k / tau_arr)
+        h_k = (1.0 - d_k) / dt_dec_k
         
-        # Coefficients for S_model_k = A_k * Q_init + B_k * F
         A_k = a_prev * h_k
-        B_k = 1.0 + b_prev * h_k
-        
-        # Update coefficients for the next step Q_k
-        a_curr = a_prev * d_k
-        b_curr = b_prev * d_k + eps_arr * dt_k
+        B_k = 1.0 + b_prev * h_k - eps_arr * T_k
         
         # Accumulate sums
         S_k = S_cube[k]
@@ -521,12 +607,10 @@ def fit_persistence(ramp_cube, timestamps, epsilon=0.18, tau=120.0):
         V0 += A_k * S_k
         V1 += B_k * S_k
         
-        a_prev = a_curr
-        b_prev = b_curr
+        a_prev = a_prev * d_k
+        b_prev = b_prev * d_k + eps_arr * T_k * dt_tr_k
         
     # Solve the system of equations for each pixel:
-    # [M00  M01] [Q_init] = [V0]
-    # [M01  M11] [F     ]   [V1]
     det = M00 * M11 - M01 * M01
     
     # Avoid division by zero
@@ -544,7 +628,7 @@ def fit_persistence(ramp_cube, timestamps, epsilon=0.18, tau=120.0):
     
     return F_fit, Q_init_fit
 
-def _fit_pixel_eps_tau(times_flat, S_pixel, dt, eps_init, tau_init):
+def _fit_pixel_eps_tau(times_flat, S_pixel, dt, eps_init, tau_init, reads=4, drops1=1, drops2=16, frmtime_sec=0.231, ngroup=6):
     """
     Helper function to fit eps and tau for a single pixel.
     Uses profile likelihood (Variable Projection) to analytically solve for 
@@ -552,13 +636,31 @@ def _fit_pixel_eps_tau(times_flat, S_pixel, dt, eps_init, tau_init):
     """
     N = len(times_flat)
     
+    # Pre-compute timing grids
+    dt_decay = np.zeros(N, dtype=np.float64)
+    dt_trap = np.zeros(N, dtype=np.float64)
+    T = np.zeros(N, dtype=np.float64)
+    
+    dt0_const = (drops1 + (reads - 1) / 2.0) * frmtime_sec
+    
+    dt_decay[0] = dt0_const
+    dt_decay[1:] = dt[1:]
+    
+    for k in range(N):
+        if k % ngroup == 0:
+            dt_trap[k] = dt0_const
+            T[k] = dt0_const
+        else:
+            dt_trap[k] = dt[k]
+            T[k] = T[k-1] + dt[k]
+            
     def loss_func(params):
         eps, tau = params
         if eps < 0.0 or eps > 1.0 or tau <= 0.5:
             return 1e20
             
-        d = np.exp(-dt / tau)
-        h = (1.0 - d) / dt
+        d = np.exp(-dt_decay / tau)
+        h = (1.0 - d) / dt_decay
         
         M00 = M01 = M11 = V0 = V1 = 0.0
         a_prev = 1.0
@@ -568,10 +670,10 @@ def _fit_pixel_eps_tau(times_flat, S_pixel, dt, eps_init, tau_init):
             dk = d[k]
             hk = h[k]
             A_k = a_prev * hk
-            B_k = 1.0 + b_prev * hk
+            B_k = 1.0 + b_prev * hk - eps * T[k]
             
             a_curr = a_prev * dk
-            b_curr = b_prev * dk + eps * dt[k]
+            b_curr = b_prev * dk + eps * T[k] * dt_trap[k]
             
             Sk = S_pixel[k]
             M00 += A_k * A_k
@@ -597,13 +699,13 @@ def _fit_pixel_eps_tau(times_flat, S_pixel, dt, eps_init, tau_init):
             dk = d[k]
             hk = h[k]
             A_k = a_prev * hk
-            B_k = 1.0 + b_prev * hk
+            B_k = 1.0 + b_prev * hk - eps * T[k]
             
             S_model_k = A_k * Q_val + B_k * F_val
             res += (S_pixel[k] - S_model_k)**2
             
             a_prev = a_prev * dk
-            b_prev = b_prev * dk + eps * dt[k]
+            b_prev = b_prev * dk + eps * T[k] * dt_trap[k]
             
         return res
 
@@ -617,8 +719,8 @@ def _fit_pixel_eps_tau(times_flat, S_pixel, dt, eps_init, tau_init):
     eps_fit, tau_fit = res.x
     
     # Calculate final F and Q_init for the optimal eps and tau
-    d = np.exp(-dt / tau_fit)
-    h = (1.0 - d) / dt
+    d = np.exp(-dt_decay / tau_fit)
+    h = (1.0 - d) / dt_decay
     M00 = M01 = M11 = V0 = V1 = 0.0
     a_prev = 1.0
     b_prev = 0.0
@@ -626,9 +728,9 @@ def _fit_pixel_eps_tau(times_flat, S_pixel, dt, eps_init, tau_init):
         dk = d[k]
         hk = h[k]
         A_k = a_prev * hk
-        B_k = 1.0 + b_prev * hk
+        B_k = 1.0 + b_prev * hk - eps_fit * T[k]
         a_curr = a_prev * dk
-        b_curr = b_prev * dk + eps_fit * dt[k]
+        b_curr = b_prev * dk + eps_fit * T[k] * dt_trap[k]
         
         M00 += A_k * A_k
         M01 += A_k * B_k
@@ -673,12 +775,37 @@ def fit_persistence_model(ramp_cube, timestamps, mode="global", eps_init=0.18, t
     nint, ngroup, nx, ny = ramp_cube.shape
     N = nint * ngroup
     
+    # Get metadata from ramp_cube if available
+    reads = getattr(ramp_cube, "reads", 4)
+    drops1 = getattr(ramp_cube, "drops1", 1)
+    drops2 = getattr(ramp_cube, "drops2", 16)
+    resets1 = getattr(ramp_cube, "resets1", 50)
+    frmtime_sec = getattr(ramp_cube, "frmtime_sec", 0.231)
+    
     # Flatten timestamps and calculate dt
     times_flat = np.asarray(timestamps, dtype=np.float64).flatten()
     dt = np.zeros(N, dtype=np.float64)
     dt[0] = times_flat[1] - times_flat[0]
     dt[1:] = np.diff(times_flat)
     
+    # Pre-compute timing grids
+    dt_decay = np.zeros(N, dtype=np.float64)
+    dt_trap = np.zeros(N, dtype=np.float64)
+    T = np.zeros(N, dtype=np.float64)
+    
+    dt0_const = (drops1 + (reads - 1) / 2.0) * frmtime_sec
+    
+    dt_decay[0] = dt0_const
+    dt_decay[1:] = dt[1:]
+    
+    for k in range(N):
+        if k % ngroup == 0:
+            dt_trap[k] = dt0_const
+            T[k] = dt0_const
+        else:
+            dt_trap[k] = dt[k]
+            T[k] = T[k-1] + dt[k]
+            
     # Compute observed rates S_cube
     S_cube = np.zeros((N, nx, ny), dtype=np.float64)
     for i in range(nint):
@@ -704,8 +831,8 @@ def fit_persistence_model(ramp_cube, timestamps, mode="global", eps_init=0.18, t
             if eps < 0.0 or eps > 1.0 or tau <= 0.5:
                 return 1e30
                 
-            d = np.exp(-dt / tau)
-            h = (1.0 - d) / dt
+            d = np.exp(-dt_decay / tau)
+            h = (1.0 - d) / dt_decay
             
             A = np.zeros(N)
             B = np.zeros(N)
@@ -714,9 +841,9 @@ def fit_persistence_model(ramp_cube, timestamps, mode="global", eps_init=0.18, t
             
             for k in range(N):
                 A[k] = a_prev * h[k]
-                B[k] = 1.0 + b_prev * h[k]
+                B[k] = 1.0 + b_prev * h[k] - eps * T[k]
                 a_prev = a_prev * d[k]
-                b_prev = b_prev * d[k] + eps * dt[k]
+                b_prev = b_prev * d[k] + eps * T[k] * dt_trap[k]
                 
             M00 = np.sum(A * A)
             M01 = np.sum(A * B)
@@ -743,17 +870,17 @@ def fit_persistence_model(ramp_cube, timestamps, mode="global", eps_init=0.18, t
         eps_fit, tau_fit = res.x
         
         # Calculate final linear coefficients for optimal global params
-        d = np.exp(-dt / tau_fit)
-        h = (1.0 - d) / dt
+        d = np.exp(-dt_decay / tau_fit)
+        h = (1.0 - d) / dt_decay
         A = np.zeros(N)
         B = np.zeros(N)
         a_prev = 1.0
         b_prev = 0.0
         for k in range(N):
             A[k] = a_prev * h[k]
-            B[k] = 1.0 + b_prev * h[k]
+            B[k] = 1.0 + b_prev * h[k] - eps_fit * T[k]
             a_prev = a_prev * d[k]
-            b_prev = b_prev * d[k] + eps_fit * dt[k]
+            b_prev = b_prev * d[k] + eps_fit * T[k] * dt_trap[k]
             
         M00 = np.sum(A * A)
         M01 = np.sum(A * B)
@@ -788,7 +915,11 @@ def fit_persistence_model(ramp_cube, timestamps, mode="global", eps_init=0.18, t
         
         def fit_single_pixel(x, y):
             S_pixel = S_cube[:, x, y]
-            eps_val, tau_val, F_val, Q_val = _fit_pixel_eps_tau(times_flat, S_pixel, dt, eps_init, tau_init)
+            eps_val, tau_val, F_val, Q_val = _fit_pixel_eps_tau(
+                times_flat, S_pixel, dt, eps_init, tau_init,
+                reads=reads, drops1=drops1, drops2=drops2,
+                frmtime_sec=frmtime_sec, ngroup=ngroup
+            )
             return x, y, eps_val, tau_val, F_val, Q_val
             
         import os
@@ -816,10 +947,10 @@ def fit_persistence_model(ramp_cube, timestamps, mode="global", eps_init=0.18, t
     else:
         raise ValueError("Mode must be either 'global' or 'local'.")
 
-def plot_persistence_model(timestamps, S_cube, F_cube, P_cube, Q_cube, x_pixel, y_pixel, output_path=None):
+def plot_persistence_model(timestamps, S_cube, F_cube, P_cube, Q_cube, x_pixel, y_pixel, ramp_cube=None, M_cube=None, Mp_cube=None, output_path=None):
     """
     Plots the observed signal rate, true flux, persistence current, and trapped charge 
-    over time for a specific pixel.
+    over time for a specific pixel, and optionally overlays model integrated count ramps.
     """
     times_flat = np.asarray(timestamps).flatten()
     # Relative time in seconds from start of observation
@@ -831,28 +962,47 @@ def plot_persistence_model(timestamps, S_cube, F_cube, P_cube, Q_cube, x_pixel, 
     P = P_cube[:, x_pixel, y_pixel]
     Q = Q_cube[:, x_pixel, y_pixel]
     
-    fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
+    if ramp_cube is not None and M_cube is not None:
+        fig, axes = plt.subplots(4, 1, figsize=(10, 10), sharex=True)
+        
+        # 1. Ramps (counts in DN)
+        nint, ngroup, nx, ny = ramp_cube.shape
+        raw_counts = ramp_cube.reshape(-1, nx, ny)[:, x_pixel, y_pixel]
+        axes[0].plot(time_rel, raw_counts, label="Observed Counts", color="#7f7f7f", marker="o", linestyle="-", alpha=0.6)
+        axes[0].plot(time_rel, M_cube[:, x_pixel, y_pixel], label="Model (with Persistence)", color="#d62728", linewidth=2)
+        if Mp_cube is not None:
+            axes[0].plot(time_rel, Mp_cube[:, x_pixel, y_pixel], label="Model (no Persistence)", color="#2ca02c", linestyle="--", linewidth=1.5)
+        axes[0].set_ylabel("Counts (DN)")
+        axes[0].set_title(f"Persistence Model & Ramps for Pixel (x={x_pixel}, y={y_pixel})")
+        axes[0].legend()
+        axes[0].grid(True, alpha=0.3)
+        
+        ax_offset = 1
+    else:
+        fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
+        ax_offset = 0
+        
+    # 2. Observed Signal and True Flux (rates)
+    axes[ax_offset + 0].plot(time_rel, S, label="Observed Signal Rate (S)", color="#1f77b4", alpha=0.8)
+    axes[ax_offset + 0].plot(time_rel, F, label="True Flux Rate (F)", color="#2ca02c", linestyle="--", alpha=0.8)
+    axes[ax_offset + 0].set_ylabel("Rate (DN/s)")
+    if ax_offset == 0:
+        axes[ax_offset + 0].set_title(f"Persistence Model for Pixel (x={x_pixel}, y={y_pixel})")
+    axes[ax_offset + 0].legend()
+    axes[ax_offset + 0].grid(True, alpha=0.3)
     
-    # 1. Observed Signal and True Flux
-    axes[0].plot(time_rel, S, label="Observed Signal Rate (S)", color="#1f77b4", alpha=0.8)
-    axes[0].plot(time_rel, F, label="True Flux Rate (F)", color="#2ca02c", linestyle="--", alpha=0.8)
-    axes[0].set_ylabel("Rate (DN/s)")
-    axes[0].set_title(f"Persistence Model for Pixel (x={x_pixel}, y={y_pixel})")
-    axes[0].legend()
-    axes[0].grid(True, alpha=0.3)
+    # 3. Persistence Current (rate)
+    axes[ax_offset + 1].plot(time_rel, P, label="Persistence Current (P)", color="#ff7f0e", alpha=0.8)
+    axes[ax_offset + 1].set_ylabel("Persistence (DN/s)")
+    axes[ax_offset + 1].legend()
+    axes[ax_offset + 1].grid(True, alpha=0.3)
     
-    # 2. Persistence Current
-    axes[1].plot(time_rel, P, label="Persistence Current (P)", color="#ff7f0e", alpha=0.8)
-    axes[1].set_ylabel("Persistence (DN/s)")
-    axes[1].legend()
-    axes[1].grid(True, alpha=0.3)
-    
-    # 3. Trapped Charge
-    axes[2].plot(time_rel, Q, label="Trapped Charge (Q)", color="#d62728", alpha=0.8)
-    axes[2].set_xlabel("Time (seconds since start of observation)")
-    axes[2].set_ylabel("Trapped Charge (DN)")
-    axes[2].legend()
-    axes[2].grid(True, alpha=0.3)
+    # 4. Trapped Charge (charge)
+    axes[ax_offset + 2].plot(time_rel, Q, label="Trapped Charge (Q)", color="#d62728", alpha=0.8)
+    axes[ax_offset + 2].set_xlabel("Time (seconds since start of observation)")
+    axes[ax_offset + 2].set_ylabel("Trapped Charge (DN)")
+    axes[ax_offset + 2].legend()
+    axes[ax_offset + 2].grid(True, alpha=0.3)
     
     plt.tight_layout()
     

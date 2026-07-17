@@ -1,0 +1,72 @@
+# %%
+
+# Working on a persistence model for a single pixel (px, py) across all integrations and groups
+times_sec_flat = times_sec.flatten()
+ramp_cube_flat = ramp_cube.reshape(-1, ramp_cube.shape[2], ramp_cube.shape[3])
+
+S = np.zeros(ramp_cube_flat.shape[0])  # Observed signal for the pixel
+Q = np.zeros(ramp_cube_flat.shape[0])  # Trapped charge for the pixel
+F = np.zeros(ramp_cube_flat.shape[0])  # True charge rate for the pixel 
+P = np.zeros(ramp_cube_flat.shape[0])  # Rate of persistence released  
+M = np.zeros(ramp_cube_flat.shape[0])  # Modeled signal for the pixel
+Mp = np.zeros(ramp_cube_flat.shape[0])  # Model with no persistence for the pixel
+
+bias = intercepts[0, px, py]   # Guess at bias level for the pixel
+tau = 20.0  # Decay time constant for the pixel
+eps = 0.2  # Efficiency of the pixel
+Qo = slopes[0, px, py] * 0.20 * (times_sec_flat[5] - times_sec_flat[0])  # Initial trapped charge for the pixel
+
+# Time from reset to Group 0 midpoint (s)
+dt0 = (data.drops1 + (data.reads - 1) / 2.0) * data.frmtime_sec  
+star_rate = slopes[0, px, py]  # True flux rate for the pixel
+decay = np.exp(-dt0 / tau)
+
+Q[0] = Qo * decay + eps * star_rate * dt0  # Trapped charge (DN)
+P[0] = Qo * (1.0 - decay)/dt0  # Released signal rate (DN/sec)
+S[0] = star_rate + P[0]        # observed signal rate for the pixel (DN/sec)
+F[0] = star_rate               # True flux rate for the pixel (DN/sec)
+M[0] = bias + S[0] * dt0       # Initial modeled signal for the pixel
+Mp[0] = bias + F[0] * dt0      # Initial modeled signal for the pixel with no persistence
+
+N = len(times_sec_flat)
+for i in range(1, N):
+    
+    if i % data.ngroup == 0:
+    
+        dt0 = (data.drops1 + (data.reads - 1) / 2.0) * data.frmtime_sec 
+        decay = np.exp(-dt0 / tau)
+        
+        Q[i] = Q[i-1] * decay + eps * star_rate * dt0  # Update trapped charge (DN)
+        P[i] = Q[i-1] * (1.0 - decay) / dt0 # DN/sec
+        S[i] = star_rate + P[i]           # Observed rate DN/sec
+        F[i] = star_rate                  # True flux rate remains constant for this simple model
+        M[i] = bias + S[i] * dt0 # Read up the ramp.
+        Mp[i] = bias + F[i] * dt0 # Model with no persistence
+    
+    else:
+    
+        dt = times_sec_flat[i] - times_sec_flat[i-1]
+        decay = np.exp(-dt / tau)
+        
+        Q[i] = Q[i-1] * decay + eps * (M[i-1] - bias)  # Update trapped charge (DN)
+        P[i] = Q[i-1] * (1.0 - decay) / dt # DN/sec
+        S[i] = star_rate + P[i]           # Observed rate DN/sec
+        F[i] = star_rate                  # True flux rate remains constant for this simple model
+        M[i] = M[i-1] + S[i] * dt # Read up the ramp.
+        Mp[i] = Mp[i-1] + F[i] * dt # Model with no persistence
+    # print(Q[i], P[i], S[i], F[i], M[i], Mp[i])
+
+#plt.plot(times_sec_flat - times_sec_flat[0], ramp_cube_flat[:, px, py], marker="o", linestyle="-")
+#plt.plot(times_sec_flat - times_sec_flat[0], M, color="red", label="Pixel model", marker="o", linestyle="-")
+#plt.plot(times_sec_flat - times_sec_flat[0], Mp, color="green", label="Pixel model (no persistence)", marker="o", linestyle="-")
+#plt.xlim(0,times_sec_flat[5] - times_sec_flat[0])
+#plt.ylim(20000, 27000)
+#plt.show()
+
+Nplot = 100
+# plt.plot(times_sec_flat - times_sec_flat[0], 0 * ramp_cube_flat[:, px, py], marker="o", linestyle="-", label="Observed")
+# plt.plot(times_sec_flat - times_sec_flat[0], M - Mp, color="red", label="Pixel model", marker="o", linestyle="-")
+plt.xlim(times_sec_flat[0] - times_sec_flat[0] ,times_sec_flat[Nplot] - times_sec_flat[0])
+plt.plot(times_sec_flat - times_sec_flat[0], M / Mp, color="red", label="Pixel model", marker="o", linestyle="-")
+plt.show()
+

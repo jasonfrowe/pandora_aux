@@ -51,88 +51,91 @@ plt.plot(timestamps[integration_index, :], model, color="red", label="Fitted lin
 plt.xlabel("Time (MJD)")
 plt.ylabel("Counts (DN)")
 plt.show()
+
 # %%
+
 # Working on a persistence model for a single pixel (px, py) across all integrations and groups
 times_sec_flat = times_sec.flatten()
 ramp_cube_flat = ramp_cube.reshape(-1, ramp_cube.shape[2], ramp_cube.shape[3])
 
-plt.plot(times_sec_flat - times_sec_flat[0], ramp_cube_flat[:, px, py], marker="o", linestyle="-")
-
-S = np.zeros(ramp_cube_flat.shape[0])  # Observed signal for the pixel
-Q = np.zeros(ramp_cube_flat.shape[0])  # Trapped charge for the pixel
-F = np.zeros(ramp_cube_flat.shape[0])  # True charge rate for the pixel 
-P = np.zeros(ramp_cube_flat.shape[0])  # Rate of persistence released  
-
-bias = intercepts[0, px, py]  # Guess at bias level for the pixel
-Qo = 0.0  # Initial trapped charge for the pixel
-tau = 120.0  # Decay time constant for the pixel
-eps = 0.18  # Efficiency of the pixel
-
-# Time from reset to Group 0 midpoint (s)
-dt0 = (data.drops1 + (data.reads - 1) / 2.0) * data.frmtime_sec  
-
-# 1. Observed signal rate (DN/sec)
-S[0] = (ramp_cube_flat[0, px, py] - bias) / dt0  
-
-# 2. Persistence rate (DN/sec)
-decay = np.exp(-dt0 / tau)
-P[0] = Qo * (1.0 - decay) / dt0  
-
-# 3. True flux rate (DN/sec)
-F[0] = S[0] - P[0]  
-
-# 4. Trapped charge at the end of interval 0 (DN)
-Q[0] = Qo * decay + eps * F[0] * dt0  
-
+# --- Arrays & Parameters ---
 N = len(times_sec_flat)
+S = np.zeros(N)
+Q = np.zeros(N)
+F = np.zeros(N)
+P = np.zeros(N)
+M = np.zeros(N)
+Mp = np.zeros(N)
+
+bias = intercepts[0, px, py]   
+tau = 120.0  
+eps = 0.01  # Fraction of traps opening per physically generated photoelectron
+
+# --- Initial State ---
+dt0 = (data.drops1 + (data.reads - 1) / 2.0) * data.frmtime_sec  
+star_rate = slopes[0, px, py]  
+
+Q[0] = 0.0  
+P[0] = 0.0
+F[0] = star_rate
+S[0] = star_rate 
+M[0] = bias + S[0] * dt0       
+Mp[0] = bias + F[0] * dt0      
+
+time_since_reset = dt0 
+
+# --- Up the Ramp Loop ---
 for i in range(1, N):
-    dt = times_sec_flat[i] - times_sec_flat[i-1]
-    decay = np.exp(-dt / tau)
-
+    
     if i % data.ngroup == 0:
-        # Start of a new integration: calculate S[i] using the next group (i to i+1)
-        dt_local = times_sec_flat[i+1] - times_sec_flat[i]
-        S[i] = (ramp_cube_flat[i+1, px, py] - ramp_cube_flat[i, px, py]) / dt_local
+        # --- RESET BOUNDARY ---
+        dt = (data.drops1 + (data.reads - 1) / 2.0) * data.frmtime_sec 
+        is_reset = True
+        time_since_reset = dt  # Restart the integration clock
     else:
-        # Normal step within the same integration
-        S[i] = (ramp_cube_flat[i, px, py] - ramp_cube_flat[i-1, px, py]) / dt
+        # --- NORMAL READ ---
+        dt = times_sec_flat[i] - times_sec_flat[i-1]
+        is_reset = False
+        time_since_reset += dt # Advance the integration clock
 
-    P[i] = Q[i-1] * (1.0 - decay) / dt
-    F[i] = S[i] - P[i]
-    Q[i] = Q[i-1] * decay + eps * F[i] * dt
-
-
-
-# # Extract the fitted true flux for this specific pixel
-# F_pixel = F
-
-# for k in range(N):
-#     if k % data.ngroup == 0:
-#         # Start of an integration: anchor the model to the first group readout
-#         M[k] = ramp_cube_flat[k, px, py]
-#     else:
-#         # Within the same integration: accumulate signal
-#         dt = times_sec_flat[k] - times_sec_flat[k-1]
+    decay = np.exp(-dt / tau)
+    
+    # 1. Release charge from the trap pool (dominates EARLY in the ramp)
+    released_charge = Q[i-1] * (1.0 - decay)
+    P[i] = released_charge / dt 
+    
+    # 2. Trap new charge (dominates LATE in the ramp as signal accumulates)
+    true_accumulated = star_rate * time_since_reset
+    trapped_charge = eps * true_accumulated * dt
+    
+    # 3. Update the trapped pool
+    Q[i] = Q[i-1] - released_charge + trapped_charge
+    
+    # 4. Calculate observed rate: (True) + (Released) - (Lost to traps)
+    S[i] = star_rate + P[i] - (trapped_charge / dt)
+    F[i] = star_rate
+    
+    # 5. Build the ramps
+    if is_reset:
+        M[i]  = bias + S[i] * dt
+        Mp[i] = bias + F[i] * dt   # FIXED: Mp now resets correctly!
+    else:
+        M[i]  = M[i-1] + S[i] * dt
+        Mp[i] = Mp[i-1] + F[i] * dt
         
-#         # Modeled signal rate = True Flux + Modeled Persistence rate
-#         S_model = F_pixel + P_cube[k, px, py]
-        
-#         # Integrate (counts at previous step + rate * time)
-#         M[k] = M[k-1] + S_model * dt
 
-plt.plot(times_sec_flat - times_sec_flat[0], M, color="red", label="Pixel model")
-
-plt.xlim(0, times_sec_flat[12] - times_sec_flat[0])
-plt.ylim(20000, 27000)
-
-plt.xlabel("Time (s)")
-plt.ylabel("Counts (DN)")
+Nplot = 100
+# plt.plot(times_sec_flat - times_sec_flat[0], 0 * ramp_cube_flat[:, px, py], marker="o", linestyle="-", label="Observed")
+# plt.plot(times_sec_flat - times_sec_flat[0], M - Mp, color="red", label="Pixel model", marker="o", linestyle="-")
+# plt.plot(times_sec_flat - times_sec_flat[0], ramp_cube_flat[:, px, py], marker="o", linestyle="-", label="Observed")
+plt.plot(times_sec_flat - times_sec_flat[0], Mp, color="blue", label="Pixel model", marker="o", linestyle="-")
+plt.plot(times_sec_flat - times_sec_flat[0], M, color="red", label="Pixel model", marker="o", linestyle="-")
+plt.xlim(times_sec_flat[0] - times_sec_flat[0] ,times_sec_flat[Nplot] - times_sec_flat[0])
 plt.show()
-
 
 # %%
 F_fit, Q_init_fit = pandora.fit_persistence(ramp_cube, times_sec, epsilon=0.18, tau=120.0)
-P_cube, F_cube, Q_cube, S_cube = pandora.calculate_persistence(
+res = pandora.calculate_persistence(
     ramp_cube=ramp_cube,
     timestamps=times_sec,
     epsilon=0.18,
@@ -140,5 +143,16 @@ P_cube, F_cube, Q_cube, S_cube = pandora.calculate_persistence(
     Q_init=Q_init_fit
 )
 
-pandora.plot_persistence_model(times_sec, S_cube, F_cube, P_cube, Q_cube, px, py)
+pandora.plot_persistence_model(
+    times_sec, 
+    res.S_cube, 
+    res.F_cube, 
+    res.P_cube, 
+    res.Q_cube, 
+    px, 
+    py, 
+    ramp_cube=ramp_cube, 
+    M_cube=res.M_cube, 
+    Mp_cube=res.Mp_cube
+)
 # %%
